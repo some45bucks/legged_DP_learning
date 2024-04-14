@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+env/
+.env/
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Logs and Databases
+*.log
+*.sqlite3
+
+# Testing
+htmlcov/
+.coverage
+.tox/
+.pytest_cache/
+
+# Build and Distribution
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
