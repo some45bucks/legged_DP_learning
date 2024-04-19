@@ -7,4 +7,4 @@
 
 ## Helper Repos
 
-- [Go1 XMF](https://github.com/unitreerobotics/unitree_mujoco)
+- [Go1 XMF](https://github.com/google-deepmind/mujoco_menagerie)
