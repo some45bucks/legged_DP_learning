@@ -3,6 +3,8 @@ To run go [here](https://colab.research.google.com/drive/1cTvQt_X3rsgw5GapY6asvn
 
 If you figure out how to run it locally it won't shoot out as many warning messsages, but it's not too bad
 
+Let me know ASAP if the collab isn't working
+
 ## Errors and fixes
 - [libGL error: MESA-LOADER: failed to open swrast...](https://stackoverflow.com/questions/72110384/libgl-error-mesa-loader-failed-to-open-iris)
 - [Jax Cuda not installed](https://github.com/google/jax/issues/18027)
