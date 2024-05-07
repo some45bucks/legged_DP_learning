@@ -1,0 +1,62 @@
+---
+  network:
+    name: 'default'
+    head_params:
+      hidden_layer_sizes:
+        - 32
+      activation: 'relu'
+      activate_final: False
+    ppo_params:
+      value_params:
+        hidden_layer_sizes:
+          - 32
+        activation: 'relu'
+        activate_final: False
+      policy_params:
+        hidden_layer_sizes:
+          - 32
+        activation: 'relu'
+        activate_final: False
+  train:
+    name: 'Default'
+    num_timesteps: 10000
+    episode_length: 100
+    action_repeat: 1
+    num_envs: 1
+    num_eval_envs: 10
+    learning_rate: 0.0003
+    entropy_cost: 0.0001
+    discounting: 0.9
+    seed: 0
+    unroll_length: 11
+    batch_size: 16
+    num_minibatches: 32
+    num_updates_per_batch: 4
+    num_evals: 10
+    num_resets_per_eval: 0
+    normalize_observations: True
+    normalize_advantage: True
+    reward_scaling: 1.0
+    clipping_epsilon: 0.3
+    gae_lambda: 0.95
+    deterministic_eval: True
+  enviroment:
+    name: 'joy_stick_env'
+    enviroment_params:
+      action_scale: -0.3
+      kick_vel: 0.05
+      reward_config:
+        scales:
+          tracking_lin_vel: 2
+          tracking_ang_vel: 0.8
+          lin_vel_z: -2.0
+          ang_vel_xy: -0.05
+          orientation: 0.0
+          torques: -0.0005
+          action_rate: -0.05
+          feet_air_time: 0.5
+          stand_still: -1
+          termination: -10.0
+          foot_slip: -0.1
+
+    
