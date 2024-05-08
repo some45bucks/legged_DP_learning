@@ -10,7 +10,7 @@ from typing import Callable, Optional, Tuple, Union
 from absl import logging
 from brax import base
 from brax import envs
-from brax.training import acting
+from train import acting
 from brax.training import gradients
 from brax.training import pmap
 from brax.training import types
@@ -19,13 +19,13 @@ from brax.training.acme import specs
 from brax.training.agents.ppo import losses as ppo_losses
 from brax.training.types import Params
 from brax.training.types import PRNGKey
-from brax.v1 import envs as envs_v1
 import flax
 import jax
 import numpy as np
 import optax
 
-from networks.ppo import ppo_network, ppo_network_params, make_infrence_fn
+from networks.ppo import ppo_network, ppo_network_params, infrence_fn
+from train.evaluator import evaluator
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
@@ -167,7 +167,7 @@ def train_ppo(
       input = env_state.obs.shape[-1],
       output = env.action_size)
   
-  make_policy = make_infrence_fn(ppo_net)
+  make_policy = infrence_fn(ppo_net)
 
   optimizer = optax.adam(learning_rate=learning_rate)
 
@@ -218,22 +218,23 @@ def train_ppo(
     training_state, state, key = carry
     key_sgd, key_generate_unroll, new_key = jax.random.split(key, 3)
 
-    policy = make_policy(
-        (training_state.normalizer_params, training_state.params.policy))
+    policy = make_policy(training_state.params)
+    start_hidden_state = make_policy.starting_hidden_state(batch_size * num_minibatches // num_envs)
 
     def f(carry, unused_t):
       current_state, current_key = carry
       current_key, next_key = jax.random.split(current_key)
-      next_state, data = acting.generate_unroll(
+      next_state, new_hidden_state, data = acting.generate_unroll(
           env,
           current_state,
+          start_hidden_state,
           policy,
           current_key,
           unroll_length,
-          extra_fields=('truncation','p1','p2',))
-      return (next_state, next_key), data
+          extra_fields=('truncation',))
+      return (next_state, new_hidden_state, next_key), data
 
-    (state, _), data = jax.lax.scan(
+    (state, new_hidden_state, _), data = jax.lax.scan(
         f, (state, key_generate_unroll), (),
         length=batch_size * num_minibatches // num_envs)
     # Have leading dimensions (batch_size * num_minibatches, unroll_length)
@@ -325,9 +326,11 @@ def train_ppo(
       randomization_fn=v_randomization_fn,
   )
 
-  evaluator = acting.Evaluator(
+  make_policy.deterministic = deterministic_eval
+
+  evaluator_fn = evaluator(
       eval_env,
-      functools.partial(make_policy, deterministic=deterministic_eval),
+      make_policy,
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
@@ -336,10 +339,7 @@ def train_ppo(
   # Run initial eval
   metrics = {}
   if process_id == 0 and num_evals > 1:
-    metrics = evaluator.run_evaluation(
-        _unpmap(
-            (training_state.normalizer_params, training_state.params.policy)),
-        training_metrics={})
+    metrics = evaluator_fn.run_evaluation(_unpmap(training_state.params), training_metrics={})
     logging.info(metrics)
     progress_fn(0, metrics)
 
@@ -366,14 +366,12 @@ def train_ppo(
 
     if process_id == 0:
       # Run evals.
-      metrics = evaluator.run_evaluation(
-          _unpmap(
-              (training_state.normalizer_params, training_state.params.policy)),
+      metrics = evaluator_fn.run_evaluation(
+          _unpmap(training_state.params),
           training_metrics)
       logging.info(metrics)
       progress_fn(current_step, metrics)
-      params = _unpmap(
-          (training_state.normalizer_params, training_state.params.policy))
+      params = _unpmap(training_state.params)
       policy_params_fn(current_step, make_policy, params)
 
   total_steps = current_step

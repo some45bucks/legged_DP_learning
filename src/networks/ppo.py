@@ -20,6 +20,8 @@ class ppo_network_params:
 
 def make_ppo_network(head_name,input,output,head_params,value_params,policy_params) -> ppo_network:
     
+    ppo_distribution = distribution.NormalTanhDistribution(event_size=output)
+
     if head_name == 'lstm':
         print("LSTM network head")
         raise NotImplementedError("LSTM network head not implemented")
@@ -31,39 +33,42 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
 
         head_network = make_feed_forward(input,name=head_name,**head_params)
 
-    policy_network = make_feed_forward(head_network.shape[1],output_size=output,name='policy',**policy_params)
+    policy_network = make_feed_forward(head_network.shape[1],output_size=ppo_distribution.param_size,name='policy',**policy_params)
     value_network = make_feed_forward(head_network.shape[1],output_size=1,name='value',**value_params)
 
     return ppo_network(
         head_network, 
         policy_network, 
         value_network, 
-        distribution.NormalTanhDistribution(event_size=output))
+        ppo_distribution)
 
-def make_infrence_fn(ppo_network: ppo_network):
+class infrence_fn():
 
-    def make_ppo_policy(ppo_params: ppo_network_params, deterministic = False):
+    deterministic = False
+
+    def __init__(self, ppo_network: ppo_network) -> None:
+        self.ppo_network = ppo_network
+
+    def starting_hidden_state(self, batch_size: int) -> jp.ndarray:
+        return None
+
+    def __call__(self, ppo_params: ppo_network_params):
 
         def policy(observations: jp.ndarray, hidden: jp.ndarray, key: jp.ndarray) -> Tuple[jp.array, jp.array, Any]:
 
-            x, new_hidden = ppo_network.head_network.apply(ppo_params.head, observations, hidden)
-            logits, _ = ppo_network.policy_network.apply(ppo_params.policy, x)
+            x, new_hidden = self.ppo_network.head_network.apply(ppo_params.head, observations, hidden)
+            logits, _ = self.ppo_network.policy_network.apply(ppo_params.policy, x)
 
-            if deterministic:
-                return ppo_network.action_distribution.mode(logits), {}
+            if self.deterministic:
+                return self.ppo_network.action_distribution.mode(logits), new_hidden, {}
             
-            raw_actions = ppo_network.action_distribution.sample_no_postprocessing(logits, key)
+            raw_actions = self.ppo_network.action_distribution.sample_no_postprocessing(logits, key)
             
-            log_prob = ppo_network.action_distribution.log_prob(logits, raw_actions)
+            log_prob = self.ppo_network.action_distribution.log_prob(logits, raw_actions)
 
-            postprocessed_actions = ppo_network.action_distribution.postprocess(raw_actions)
+            postprocessed_actions = self.ppo_network.action_distribution.postprocess(raw_actions)
             
-            return postprocessed_actions, new_hidden, {
-                'log_prob': log_prob,
-                'raw_action': raw_actions
-            }
+            return postprocessed_actions, new_hidden, {'log_prob': log_prob,'raw_action': raw_actions}
 
         return policy
-    
-    return make_ppo_policy
 

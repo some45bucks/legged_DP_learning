@@ -181,8 +181,6 @@ class JoyStickEnv(PipelineEnv):
     qvel = qvel.at[:2].set(kick * self._kick_vel + qvel[:2])
     state = state.tree_replace({'pipeline_state.qvel': qvel})
 
-    action = action * self.mask
-
     # physics step
     motor_targets = self._default_pose + action * self._action_scale
     # motor_targets = jp.clip(motor_targets, self.lowers, self.uppers)
@@ -340,7 +338,7 @@ class JoyStickEnv(PipelineEnv):
     local_vel = math.rotate(xd.vel[0], math.quat_inv(x.rot[0]))
     lin_vel_error = jp.sum(jp.square(commands[:2] - local_vel[:2]))
     lin_vel_reward = jp.exp(
-        -lin_vel_error / self.reward_config.tracking_sigma
+        -lin_vel_error / self.reward_config['tracking_sigma']
     )
     return lin_vel_reward
 
@@ -350,7 +348,7 @@ class JoyStickEnv(PipelineEnv):
     # Tracking of angular velocity commands (yaw)
     base_ang_vel = math.rotate(xd.ang[0], math.quat_inv(x.rot[0]))
     ang_vel_error = jp.square(commands[2] - base_ang_vel[2])
-    return jp.exp(-ang_vel_error / self.reward_config.tracking_sigma)
+    return jp.exp(-ang_vel_error / self.reward_config['tracking_sigma'])
 
   def _reward_feet_air_time(
       self, air_time: jax.Array, first_contact: jax.Array, commands: jax.Array

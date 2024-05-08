@@ -46,6 +46,7 @@
       action_scale: -0.3
       kick_vel: 0.05
       reward_config:
+        tracking_sigma: 0.25
         scales:
           tracking_lin_vel: 2
           tracking_ang_vel: 0.8
