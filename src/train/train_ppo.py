@@ -11,12 +11,10 @@ from absl import logging
 from brax import base
 from brax import envs
 from train import acting
-from brax.training import gradients
 from brax.training import pmap
 from brax.training import types
 from brax.training.acme import running_statistics
 from brax.training.acme import specs
-from brax.training.agents.ppo import losses as ppo_losses
 from brax.training.types import Params
 from brax.training.types import PRNGKey
 import flax
@@ -26,19 +24,14 @@ import optax
 
 from networks.ppo import ppo_network, ppo_network_params, infrence_fn
 from train.evaluator import evaluator
+from train.gradients import gradient_update_fn as gradient_update
+from train.losses import compute_ppo_loss
+from envs.hidden_state_wrapper import HiddenStateWrapper
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
 
 _PMAP_AXIS_NAME = 'i'
-
-@flax.struct.dataclass
-class AutoEncoderParams:
-  """Contains training state for the learner."""
-  obs_encoder: Params
-  net_encoder: Params
-  obs_decoder: Params
-  net_decoder: Params
 
 @flax.struct.dataclass
 class TrainingState:
@@ -146,6 +139,8 @@ def train_ppo(
 
   wrap_for_training = envs.training.wrap
 
+  environment = HiddenStateWrapper(environment, environment.observation_size)
+
   env = wrap_for_training(
       environment,
       episode_length=episode_length,
@@ -157,7 +152,9 @@ def train_ppo(
   key_envs = jax.random.split(key_env, num_envs // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
+  
   env_state = reset_fn(key_envs)
+  
 
   normalize = lambda x, y: x
   if normalize_observations:
@@ -165,14 +162,15 @@ def train_ppo(
 
   ppo_net = make_ppo_network_partial(
       input = env_state.obs.shape[-1],
-      output = env.action_size)
+      output = env.action_size,
+      normalizer = normalize)
   
   make_policy = infrence_fn(ppo_net)
 
   optimizer = optax.adam(learning_rate=learning_rate)
 
   loss_fn = functools.partial(
-      ppo_losses.compute_ppo_loss,
+      compute_ppo_loss,
       ppo_network=ppo_net,
       entropy_cost=entropy_cost,
       discounting=discounting,
@@ -181,10 +179,10 @@ def train_ppo(
       clipping_epsilon=clipping_epsilon,
       normalize_advantage=normalize_advantage)
 
-  gradient_update_fn = gradients.gradient_update_fn(loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
+  gradient_update_fn = gradient_update(loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
 
   def minibatch_step(carry, data: types.Transition, normalizer_params: running_statistics.RunningStatisticsState):
-    optimizer_state, params, auto_opt, auto_params, key = carry
+    optimizer_state, params, key = carry
     key, key_loss= jax.random.split(key)
     (_, metrics), params, optimizer_state = gradient_update_fn(
         params,
@@ -193,10 +191,10 @@ def train_ppo(
         key_loss,
         optimizer_state=optimizer_state)
 
-    return (optimizer_state, params, auto_opt, auto_params, key), metrics
+    return (optimizer_state, params, key), metrics
 
   def sgd_step(carry, unused_t, data: types.Transition,  normalizer_params: running_statistics.RunningStatisticsState):
-    optimizer_state, params, auto_opt, auto_params, key = carry
+    optimizer_state, params, key = carry
     key, key_perm, key_grad = jax.random.split(key, 3)
 
     def convert_data(x: jp.ndarray):
@@ -205,12 +203,12 @@ def train_ppo(
       return x
 
     shuffled_data = jax.tree_util.tree_map(convert_data, data)
-    (optimizer_state, params, auto_opt, auto_params, _), metrics = jax.lax.scan(
+    (optimizer_state, params, _), metrics = jax.lax.scan(
         functools.partial(minibatch_step, normalizer_params=normalizer_params),
-        (optimizer_state, params, auto_opt, auto_params, key_grad),
+        (optimizer_state, params, key_grad),
         shuffled_data,
         length=num_minibatches)
-    return (optimizer_state, params, auto_opt, auto_params, key), metrics
+    return (optimizer_state, params, key), metrics
 
   def training_step(
       carry: Tuple[TrainingState, envs.State, PRNGKey],
@@ -218,23 +216,22 @@ def train_ppo(
     training_state, state, key = carry
     key_sgd, key_generate_unroll, new_key = jax.random.split(key, 3)
 
-    policy = make_policy(training_state.params)
-    start_hidden_state = make_policy.starting_hidden_state(batch_size * num_minibatches // num_envs)
+    make_policy.deterministic = False
+    policy = make_policy(training_state.normalizer_params,training_state.params)
 
     def f(carry, unused_t):
       current_state, current_key = carry
       current_key, next_key = jax.random.split(current_key)
-      next_state, new_hidden_state, data = acting.generate_unroll(
+      next_state, data = acting.generate_unroll(
           env,
           current_state,
-          start_hidden_state,
           policy,
           current_key,
           unroll_length,
           extra_fields=('truncation',))
-      return (next_state, new_hidden_state, next_key), data
+      return (next_state, next_key), data
 
-    (state, new_hidden_state, _), data = jax.lax.scan(
+    (state, _), data = jax.lax.scan(
         f, (state, key_generate_unroll), (),
         length=batch_size * num_minibatches // num_envs)
     # Have leading dimensions (batch_size * num_minibatches, unroll_length)
@@ -249,19 +246,18 @@ def train_ppo(
         data.observation,
         pmap_axis_name=_PMAP_AXIS_NAME)
 
-    (optimizer_state, params, auto_optimizer_state, auto_params, _), metrics = jax.lax.scan(
+    (optimizer_state, params, _), metrics = jax.lax.scan(
         functools.partial(
             sgd_step, data=data, normalizer_params=normalizer_params),
-        (training_state.optimizer_state, training_state.params, training_state.auto_optimizer_state,training_state.auto_params, key_sgd), (),
+        (training_state.optimizer_state, training_state.params, key_sgd), (),
         length=num_updates_per_batch)
 
     new_training_state = TrainingState(
         optimizer_state=optimizer_state,
-        auto_optimizer_state=auto_optimizer_state, 
-        auto_params = auto_params,
         params=params,
         normalizer_params=normalizer_params,
         env_steps=training_state.env_steps + env_step_per_training_step)
+    
     return (new_training_state, state, new_key), metrics
 
   def training_epoch(training_state: TrainingState, state: envs.State,
@@ -303,12 +299,14 @@ def train_ppo(
       head=ppo_net.head_network.init(key_head),
       policy=ppo_net.policy_network.init(key_policy),
       value=ppo_net.value_network.init(key_value))
+  
   training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
       optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
       params=init_params,
       normalizer_params=running_statistics.init_state(
           specs.Array(env_state.obs.shape[-1:], jp.dtype('float32'))),
       env_steps=0)
+  
   training_state = jax.device_put_replicated(
       training_state,
       jax.local_devices()[:local_devices_to_use])
@@ -319,6 +317,9 @@ def train_ppo(
     v_randomization_fn = functools.partial(
         randomization_fn, rng=jax.random.split(eval_key, num_eval_envs)
     )
+
+  eval_env = HiddenStateWrapper(eval_env, eval_env.observation_size)
+
   eval_env = wrap_for_training(
       eval_env,
       episode_length=episode_length,
@@ -339,7 +340,7 @@ def train_ppo(
   # Run initial eval
   metrics = {}
   if process_id == 0 and num_evals > 1:
-    metrics = evaluator_fn.run_evaluation(_unpmap(training_state.params), training_metrics={})
+    metrics = evaluator_fn.run_evaluation(_unpmap(training_state.normalizer_params), _unpmap(training_state.params), training_metrics={})
     logging.info(metrics)
     progress_fn(0, metrics)
 
@@ -366,12 +367,11 @@ def train_ppo(
 
     if process_id == 0:
       # Run evals.
-      metrics = evaluator_fn.run_evaluation(
-          _unpmap(training_state.params),
+      metrics = evaluator_fn.run_evaluation(_unpmap(training_state.normalizer_params), _unpmap(training_state.params),
           training_metrics)
       logging.info(metrics)
       progress_fn(current_step, metrics)
-      params = _unpmap(training_state.params)
+      params = _unpmap((training_state.normalizer_params,training_state.params))
       policy_params_fn(current_step, make_policy, params)
 
   total_steps = current_step
@@ -380,10 +380,7 @@ def train_ppo(
   # If there was no mistakes the training_state should still be identical on all
   # devices.
   pmap.assert_is_replicated(training_state)
-  params = _unpmap(
-      (training_state.normalizer_params, training_state.params.policy))
-  auto_params = _unpmap(
-      (training_state.auto_params.obs_encoder, training_state.auto_params.obs_decoder, training_state.auto_params.net_encoder, training_state.auto_params.net_decoder))
+
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()
-  return (make_policy, params, auto_params, metrics)
+  return (make_policy, training_state.normalizer_params, training_state.params, metrics)

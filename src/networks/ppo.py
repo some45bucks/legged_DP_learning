@@ -1,12 +1,15 @@
 from jax import numpy as jp
-from typing import Any, Tuple
+from typing import Any, Tuple, Sequence, Callable
 from brax.training import distribution
 from networks.networks import Network
 from networks.networks import make_feed_forward
+from brax.training.acme import running_statistics
 import flax
 
 @flax.struct.dataclass
 class ppo_network:
+    has_hidden_state: bool
+    normalizer: Callable[..., Any]
     head_network: Network
     policy_network: Network
     value_network: Network
@@ -18,7 +21,7 @@ class ppo_network_params:
     policy: jp.ndarray
     value: jp.ndarray
 
-def make_ppo_network(head_name,input,output,head_params,value_params,policy_params) -> ppo_network:
+def make_ppo_network(head_name,input,output,head_params,value_params,policy_params,normalizer) -> ppo_network:
     
     ppo_distribution = distribution.NormalTanhDistribution(event_size=output)
 
@@ -30,13 +33,14 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
         raise NotImplementedError("Transformer network head not implemented")
     else:
         print("Defaulting to Feed Forward network head")
-
         head_network = make_feed_forward(input,name=head_name,**head_params)
 
     policy_network = make_feed_forward(head_network.shape[1],output_size=ppo_distribution.param_size,name='policy',**policy_params)
     value_network = make_feed_forward(head_network.shape[1],output_size=1,name='value',**value_params)
 
     return ppo_network(
+        head_network.hasHiddenState,
+        normalizer,
         head_network, 
         policy_network, 
         value_network, 
@@ -49,15 +53,13 @@ class infrence_fn():
     def __init__(self, ppo_network: ppo_network) -> None:
         self.ppo_network = ppo_network
 
-    def starting_hidden_state(self, batch_size: int) -> jp.ndarray:
-        return None
-
-    def __call__(self, ppo_params: ppo_network_params):
+    def __call__(self,normalizer_params: running_statistics.RunningStatisticsState ,ppo_params: ppo_network_params):
 
         def policy(observations: jp.ndarray, hidden: jp.ndarray, key: jp.ndarray) -> Tuple[jp.array, jp.array, Any]:
 
-            x, new_hidden = self.ppo_network.head_network.apply(ppo_params.head, observations, hidden)
-            logits, _ = self.ppo_network.policy_network.apply(ppo_params.policy, x)
+            observations = self.ppo_network.normalizer(observations, normalizer_params)
+            x, new_hidden = self.ppo_network.head_network.apply(ppo_params.head, hidden, observations)
+            logits, _ = self.ppo_network.policy_network.apply(ppo_params.policy, None, x)
 
             if self.deterministic:
                 return self.ppo_network.action_distribution.mode(logits), new_hidden, {}

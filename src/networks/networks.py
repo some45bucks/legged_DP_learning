@@ -12,7 +12,6 @@ class Network:
   hasHiddenState: bool
   init: Callable[..., Any]
   apply: Callable[..., Any]
-  resetHidden: Callable[..., Any]
 
 def activation_fn_selector(activation: str):
   if activation == 'relu':
@@ -36,23 +35,22 @@ def make_feed_forward(
   activation_fn = activation_fn_selector(activation)
 
   if output_size == None:
-    layers = list(jp.concat((jp.array([input_size]),jp.array(hidden_layer_sizes))))
+    layers = list(hidden_layer_sizes)
     output_size = hidden_layer_sizes[-1]
   else:
-    layers = list(jp.concat((jp.array([input_size]),jp.array(hidden_layer_sizes),jp.array([output_size]))))
+    layers = list(jp.concat((jp.array(hidden_layer_sizes),jp.array([output_size]))))
 
   policy_module = FeedForward(name=name,layer_sizes=layers,activation=activation_fn,activate_final=activate_final)
 
-  def apply(params, data, hidden=None):
+  def apply(params, hidden, data):
     return policy_module.apply(params, data), hidden
 
-  dummy_input = jp.zeros((input_size,))
+  dummy_input = jp.zeros((1,1,input_size))
 
   new_feed_forward = Network(
       shape=(input_size, output_size),
       hasHiddenState=False,
       init=lambda key: policy_module.init(key, dummy_input),
-      apply=apply,
-      resetHidden=lambda: None)
+      apply=apply)
   
   return new_feed_forward

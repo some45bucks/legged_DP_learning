@@ -20,14 +20,13 @@ class evaluator:
 
     eval_env = envs.training.EvalWrapper(eval_env)
 
-    def generate_eval_unroll(params: Any, key: PRNGKey) -> envs.State:
+    def generate_eval_unroll(normalizer_params: Any, params: Any, key: PRNGKey) -> envs.State:
       reset_keys = jax.random.split(key, num_eval_envs)
       eval_first_state = eval_env.reset(reset_keys)
       return generate_unroll(
           eval_env,
           eval_first_state,
-          eval_policy_fn.starting_hidden_state(num_eval_envs),
-          eval_policy_fn(params),
+          eval_policy_fn(normalizer_params, params),
           key,
           unroll_length=episode_length // action_repeat)[0]
 
@@ -35,6 +34,7 @@ class evaluator:
     self._steps_per_unroll = episode_length * num_eval_envs
 
   def run_evaluation(self,
+                     normalizer_params: Any,
                      params: Any,
                      training_metrics: Any,
                      aggregate_episodes: bool = True) -> Any:
@@ -42,7 +42,7 @@ class evaluator:
     self._key, unroll_key = jax.random.split(self._key)
 
     t = time.time()
-    eval_state = self._generate_eval_unroll(params, unroll_key)
+    eval_state = self._generate_eval_unroll(normalizer_params, params, unroll_key)
     eval_metrics = eval_state.info['eval_metrics']
     eval_metrics.active_episodes.block_until_ready()
     epoch_eval_time = time.time() - t
