@@ -42,7 +42,7 @@ def make_feed_forward(
 
   policy_module = FeedForward(name=name,layer_sizes=layers,activation=activation_fn,activate_final=activate_final)
 
-  def apply(params, hidden, data):
+  def apply(params, data, hidden):
     return policy_module.apply(params, data), hidden
 
   dummy_input = jp.zeros((1,1,input_size))

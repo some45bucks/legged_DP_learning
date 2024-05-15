@@ -6,14 +6,13 @@ from brax.training.types import PRNGKey
 import jax
 from jax import numpy as jp
 
-from train.acting import generate_unroll
-from networks.ppo import infrence_fn
+from train.acting import unroll
+from networks.ppo import ppo_network, ppo_network_params
 
 class evaluator:
   """Class to run evaluations."""
 
-  def __init__(self, eval_env: envs.Env,
-               eval_policy_fn: infrence_fn, num_eval_envs: int,
+  def __init__(self, eval_env: envs.Env,  ppo_network: ppo_network, num_eval_envs: int,
                episode_length: int, action_repeat: int, key: PRNGKey):
     self._key = key
     self._eval_walltime = 0
@@ -23,12 +22,14 @@ class evaluator:
     def generate_eval_unroll(normalizer_params: Any, params: Any, key: PRNGKey) -> envs.State:
       reset_keys = jax.random.split(key, num_eval_envs)
       eval_first_state = eval_env.reset(reset_keys)
-      return generate_unroll(
-          eval_env,
-          eval_first_state,
-          eval_policy_fn(normalizer_params, params),
-          key,
-          unroll_length=episode_length // action_repeat)[0]
+      return unroll(
+        ppo_network,
+        normalizer_params,
+        params,
+        eval_first_state,
+        key,
+        eval_env,
+        unroll_length=episode_length // action_repeat)[0]
 
     self._generate_eval_unroll = jax.jit(generate_eval_unroll)
     self._steps_per_unroll = episode_length * num_eval_envs

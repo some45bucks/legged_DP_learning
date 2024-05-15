@@ -14,6 +14,7 @@ class ppo_network:
     policy_network: Network
     value_network: Network
     action_distribution: distribution.ParametricDistribution
+    reset_hidden: Callable[..., Any]
 
 @flax.struct.dataclass
 class ppo_network_params:
@@ -44,7 +45,8 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
         head_network, 
         policy_network, 
         value_network, 
-        ppo_distribution)
+        ppo_distribution,
+        lambda x: None)
 
 class infrence_fn():
 

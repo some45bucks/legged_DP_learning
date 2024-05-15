@@ -5,7 +5,7 @@ from typing import Tuple, Union
 
 import functools
 import time
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union, Any
 
 from absl import logging
 from brax import base
@@ -53,6 +53,11 @@ def _strip_weak_type(tree):
     return leaf.astype(leaf.dtype)
   return jax.tree_util.tree_map(f, tree)
 
+def wrap(env, episode_length, action_repeat, randomization_fn=None, hidden_state_func=None):
+  env = HiddenStateWrapper(env, hidden_state_func)
+  env = envs.training.wrap(env, episode_length, action_repeat, randomization_fn)
+  
+  return env
 
 def train_ppo(
     make_ppo_network_partial: Callable[..., ppo_network],
@@ -137,24 +142,14 @@ def train_ppo(
         randomization_fn, rng=randomization_rng
     )
 
-  wrap_for_training = envs.training.wrap
-
-  environment = HiddenStateWrapper(environment, environment.observation_size)
-
-  env = wrap_for_training(
-      environment,
-      episode_length=episode_length,
-      action_repeat=action_repeat,
-      randomization_fn=v_randomization_fn,
-  )
+  env = wrap(environment, episode_length, action_repeat, randomization_fn)
 
   reset_fn = jax.jit(jax.vmap(env.reset))
   key_envs = jax.random.split(key_env, num_envs // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
-  
+
   env_state = reset_fn(key_envs)
-  
 
   normalize = lambda x, y: x
   if normalize_observations:
@@ -171,6 +166,7 @@ def train_ppo(
 
   loss_fn = functools.partial(
       compute_ppo_loss,
+      env=env,
       ppo_network=ppo_net,
       entropy_cost=entropy_cost,
       discounting=discounting,
@@ -181,75 +177,37 @@ def train_ppo(
 
   gradient_update_fn = gradient_update(loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
 
-  def minibatch_step(carry, data: types.Transition, normalizer_params: running_statistics.RunningStatisticsState):
-    optimizer_state, params, key = carry
+  def minibatch_step(carry, xs ,normalizer_params: running_statistics.RunningStatisticsState):
+    optimizer_state, params, state, key = carry
     key, key_loss= jax.random.split(key)
-    (_, metrics), params, optimizer_state = gradient_update_fn(
+
+    (_, out_data), params, optimizer_state = gradient_update_fn(
         params,
+        state,
         normalizer_params,
-        data,
         key_loss,
         optimizer_state=optimizer_state)
 
-    return (optimizer_state, params, key), metrics
+    return (optimizer_state, params, out_data['state_info']['final_state'], key), out_data['loss_metrics']
 
-  def sgd_step(carry, unused_t, data: types.Transition,  normalizer_params: running_statistics.RunningStatisticsState):
-    optimizer_state, params, key = carry
-    key, key_perm, key_grad = jax.random.split(key, 3)
+  def sgd_step(carry, unused_t,  normalizer_params: running_statistics.RunningStatisticsState):
+    optimizer_state, params, state, key = carry
+    key, key_grad = jax.random.split(key, 2)
 
-    def convert_data(x: jp.ndarray):
-      x = jax.random.permutation(key_perm, x)
-      x = jp.reshape(x, (num_minibatches, -1) + x.shape[1:])
-      return x
-
-    shuffled_data = jax.tree_util.tree_map(convert_data, data)
-    (optimizer_state, params, _), metrics = jax.lax.scan(
+    (optimizer_state, params, state, _), loss_metrics = jax.lax.scan(
         functools.partial(minibatch_step, normalizer_params=normalizer_params),
-        (optimizer_state, params, key_grad),
-        shuffled_data,
+        (optimizer_state, params, state, key_grad), (),
         length=num_minibatches)
-    return (optimizer_state, params, key), metrics
+    return (optimizer_state, params, state, key), loss_metrics
 
   def training_step(
       carry: Tuple[TrainingState, envs.State, PRNGKey],
       unused_t) -> Tuple[Tuple[TrainingState, envs.State, PRNGKey], Metrics]:
     training_state, state, key = carry
-    key_sgd, key_generate_unroll, new_key = jax.random.split(key, 3)
+    key_sgd, new_key = jax.random.split(key, 2)    
 
-    make_policy.deterministic = False
-    policy = make_policy(training_state.normalizer_params,training_state.params)
-
-    def f(carry, unused_t):
-      current_state, current_key = carry
-      current_key, next_key = jax.random.split(current_key)
-      next_state, data = acting.generate_unroll(
-          env,
-          current_state,
-          policy,
-          current_key,
-          unroll_length,
-          extra_fields=('truncation',))
-      return (next_state, next_key), data
-
-    (state, _), data = jax.lax.scan(
-        f, (state, key_generate_unroll), (),
-        length=batch_size * num_minibatches // num_envs)
-    # Have leading dimensions (batch_size * num_minibatches, unroll_length)
-    data = jax.tree_util.tree_map(lambda x: jp.swapaxes(x, 1, 2), data)
-    data = jax.tree_util.tree_map(lambda x: jp.reshape(x, (-1,) + x.shape[2:]),
-                                  data)
-    assert data.discount.shape[1:] == (unroll_length,)
-
-    # Update normalization params and normalize observations.
-    normalizer_params = running_statistics.update(
-        training_state.normalizer_params,
-        data.observation,
-        pmap_axis_name=_PMAP_AXIS_NAME)
-
-    (optimizer_state, params, _), metrics = jax.lax.scan(
-        functools.partial(
-            sgd_step, data=data, normalizer_params=normalizer_params),
-        (training_state.optimizer_state, training_state.params, key_sgd), (),
+    (optimizer_state, params, normalizer_params, state, _), loss_metrics = jax.lax.scan(functools.partial(sgd_step, normalizer_params=training_state.normalizer_params),
+        (training_state.optimizer_state, training_state.params, state, key_sgd), (),
         length=num_updates_per_batch)
 
     new_training_state = TrainingState(
@@ -258,13 +216,14 @@ def train_ppo(
         normalizer_params=normalizer_params,
         env_steps=training_state.env_steps + env_step_per_training_step)
     
-    return (new_training_state, state, new_key), metrics
+    return (new_training_state, state, new_key), loss_metrics
 
   def training_epoch(training_state: TrainingState, state: envs.State,
                      key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
     (training_state, state, _), loss_metrics = jax.lax.scan(
         training_step, (training_state, state, key), (),
         length=num_training_steps_per_epoch)
+
     loss_metrics = jax.tree_util.tree_map(jp.mean, loss_metrics)
     return training_state, state, loss_metrics
 
@@ -276,7 +235,7 @@ def train_ppo(
       key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
     nonlocal training_walltime
     t = time.time()
-    training_state, env_state = _strip_weak_type((training_state, env_state))
+    training_state, env_state= _strip_weak_type((training_state, env_state))
     result = training_epoch(training_state, env_state, key)
     training_state, env_state, metrics = _strip_weak_type(result)
 
@@ -318,20 +277,13 @@ def train_ppo(
         randomization_fn, rng=jax.random.split(eval_key, num_eval_envs)
     )
 
-  eval_env = HiddenStateWrapper(eval_env, eval_env.observation_size)
-
-  eval_env = wrap_for_training(
-      eval_env,
-      episode_length=episode_length,
-      action_repeat=action_repeat,
-      randomization_fn=v_randomization_fn,
-  )
+  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn)
 
   make_policy.deterministic = deterministic_eval
 
   evaluator_fn = evaluator(
       eval_env,
-      make_policy,
+      ppo_net,
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
@@ -362,7 +314,7 @@ def train_ppo(
       key_envs = jax.vmap(
           lambda x, s: jax.random.split(x[0], s),
           in_axes=(0, None))(key_envs, key_envs.shape[1])
-      # TODO: move extra reset logic to the AutoResetWrapper.
+
       env_state = reset_fn(key_envs) if num_resets_per_eval > 0 else env_state
 
     if process_id == 0:

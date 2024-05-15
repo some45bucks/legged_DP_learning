@@ -1,18 +1,22 @@
 from typing import Any, Tuple
-
-from brax.training.types import Params
+from typing import Sequence, Callable
+from brax.training.types import Params, PRNGKey, NamedTuple
 import flax
 import jax
-import jax.numpy as jnp
-
-from train.acting import Transition
+import jax.numpy as jp
+from brax import envs
+from brax.training.acme import running_statistics
 from networks.ppo import ppo_network, ppo_network_params
 
-def compute_gae(truncation: jnp.ndarray,
-                termination: jnp.ndarray,
-                rewards: jnp.ndarray,
-                values: jnp.ndarray,
-                bootstrap_value: jnp.ndarray,
+from train.acting import unroll
+
+_PMAP_AXIS_NAME = 'i'
+
+def compute_gae(truncation: jp.ndarray,
+                termination: jp.ndarray,
+                rewards: jp.ndarray,
+                values: jp.ndarray,
+                bootstrap_value: jp.ndarray,
                 lambda_: float = 1.0,
                 discount: float = 0.99):
   """Calculates the Generalized Advantage Estimation (GAE).
@@ -38,12 +42,12 @@ def compute_gae(truncation: jnp.ndarray,
 
   truncation_mask = 1 - truncation
   # Append bootstrapped value to get [v1, ..., v_t+1]
-  values_t_plus_1 = jnp.concatenate(
-      [values[1:], jnp.expand_dims(bootstrap_value, 0)], axis=0)
+  values_t_plus_1 = jp.concatenate(
+      [values[1:], jp.expand_dims(bootstrap_value, 0)], axis=0)
   deltas = rewards + discount * (1 - termination) * values_t_plus_1 - values
   deltas *= truncation_mask
 
-  acc = jnp.zeros_like(bootstrap_value)
+  acc = jp.zeros_like(bootstrap_value)
   vs_minus_v_xs = []
 
   def compute_vs_minus_v_xs(carry, target_t):
@@ -58,10 +62,10 @@ def compute_gae(truncation: jnp.ndarray,
       length=int(truncation_mask.shape[0]),
       reverse=True)
   # Add V(x_s) to get v_s.
-  vs = jnp.add(vs_minus_v_xs, values)
+  vs = jp.add(vs_minus_v_xs, values)
 
-  vs_t_plus_1 = jnp.concatenate(
-      [vs[1:], jnp.expand_dims(bootstrap_value, 0)], axis=0)
+  vs_t_plus_1 = jp.concatenate(
+      [vs[1:], jp.expand_dims(bootstrap_value, 0)], axis=0)
   advantages = (rewards + discount *
                 (1 - termination) * vs_t_plus_1 - values) * truncation_mask
   return jax.lax.stop_gradient(vs), jax.lax.stop_gradient(advantages)
@@ -69,85 +73,81 @@ def compute_gae(truncation: jnp.ndarray,
 
 def compute_ppo_loss(
     params: ppo_network_params,
+    start_state: envs.State,
     normalizer_params: Any,
-    data: Transition,
-    rng: jnp.ndarray,
+    rng: jp.ndarray,
     ppo_network: ppo_network,
+    env: envs.Env,
+    unroll_length: int = 20,
     entropy_cost: float = 1e-4,
     discounting: float = 0.9,
     reward_scaling: float = 1.0,
     gae_lambda: float = 0.95,
     clipping_epsilon: float = 0.3,
-    normalize_advantage: bool = True) -> Tuple[jnp.ndarray, Any]:
+    normalize_advantage: bool = True) -> Tuple[jp.ndarray, Any]:
 
-    parametric_action_distribution = ppo_network.action_distribution
-    normalizer = ppo_network.normalizer
-    head_apply = ppo_network.head_network.apply
-    policy_apply = ppo_network.policy_network.apply
-    value_apply = ppo_network.value_network.apply
+    key1, key2 = jax.random.split(rng)
 
-    # Put the time dimension first.
-    data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
+    final_state, data = unroll(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
 
-    observations = normalizer(data.observation,normalizer_params)
+    normalizer_params = running_statistics.update(
+        normalizer_params,
+        data.observation,
+        pmap_axis_name=_PMAP_AXIS_NAME)
 
-    z, _ = head_apply(params.head, data.hidden_state, observations)
+    next_observation = ppo_network.normalizer(data.next_observation[-1], normalizer_params)
 
-    policy_logits, _ = policy_apply(params.policy, None, z)
-
-    baseline, _ = value_apply(params.value, None, z)
-
-    baseline = jnp.squeeze(baseline, axis=-1)
-
-    next_observation = normalizer(data.next_observation[-1], normalizer_params)
-
-    if ppo_network.has_hidden_state:
-        z, _ = head_apply(params.head, data.next_hidden_state[-1], next_observation)
-    else:
-        z, _ = head_apply(params.head, None, next_observation)
+    if data.next_hidden_state is None:
+      hidden, _ = ppo_network.head_network.apply(params.head, next_observation, None)
+    else: 
+      hidden, _ = ppo_network.head_network.apply(params.head, next_observation, data.next_hidden_state[-1])
     
-    bootstrap_value, _ = value_apply(params.value, None, z)
+    bootstrap_value, _ = ppo_network.value_network.apply(params.value, hidden, None)
 
-    bootstrap_value = jnp.squeeze(bootstrap_value, axis=-1)
+    bootstrap_value = jp.squeeze(bootstrap_value, axis=-1)
 
     rewards = data.reward * reward_scaling
-    truncation = data.extras['state_extras']['truncation']
+    truncation = data.truncation
     termination = (1 - data.discount) * (1 - truncation)
 
-    target_action_log_probs = parametric_action_distribution.log_prob(
-        policy_logits, data.extras['policy_extras']['raw_action'])
-    behaviour_action_log_probs = data.extras['policy_extras']['log_prob']
+    target_action_log_probs = ppo_network.action_distribution.log_prob(
+        data.logits, data.raw_actions)
+    behaviour_action_log_probs = data.log_prob
 
     vs, advantages = compute_gae(
         truncation=truncation,
         termination=termination,
         rewards=rewards,
-        values=baseline,
+        values=data.baseline,
         bootstrap_value=bootstrap_value,
         lambda_=gae_lambda,
         discount=discounting)
     if normalize_advantage:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    rho_s = jnp.exp(target_action_log_probs - behaviour_action_log_probs)
+    rho_s = jp.exp(target_action_log_probs - behaviour_action_log_probs)
 
     surrogate_loss1 = rho_s * advantages
-    surrogate_loss2 = jnp.clip(rho_s, 1 - clipping_epsilon,
+    surrogate_loss2 = jp.clip(rho_s, 1 - clipping_epsilon,
                                 1 + clipping_epsilon) * advantages
 
-    policy_loss = -jnp.mean(jnp.minimum(surrogate_loss1, surrogate_loss2))
+    policy_loss = -jp.mean(jp.minimum(surrogate_loss1, surrogate_loss2))
 
     # Value function loss
-    v_error = vs - baseline
-    v_loss = jnp.mean(v_error * v_error) * 0.5 * 0.5
+    v_error = vs - data.baseline
+    v_loss = jp.mean(v_error * v_error) * 0.5 * 0.5
 
     # Entropy reward
-    entropy = jnp.mean(parametric_action_distribution.entropy(policy_logits, rng))
+    entropy = jp.mean(ppo_network.action_distribution.entropy(data.logits, key2))
     entropy_loss = entropy_cost * -entropy
 
     total_loss = policy_loss + v_loss + entropy_loss
     return total_loss, {
-        'total_loss': total_loss,
-        'policy_loss': policy_loss,
-        'v_loss': v_loss,
-        'entropy_loss': entropy_loss
+       'loss_metrics':{
+          'total_loss': total_loss,
+          'policy_loss': policy_loss,
+          'v_loss': v_loss,
+          'entropy_loss': entropy_loss
+        },
+        'state_info':{
+          'final_state': final_state        }
     }
