@@ -6,7 +6,7 @@ from brax.training.types import PRNGKey
 import jax
 from jax import numpy as jp
 
-from train.acting import unroll
+from train.acting import unroll_policy
 from networks.ppo import ppo_network, ppo_network_params
 
 class evaluator:
@@ -22,7 +22,7 @@ class evaluator:
     def generate_eval_unroll(normalizer_params: Any, params: Any, key: PRNGKey) -> envs.State:
       reset_keys = jax.random.split(key, num_eval_envs)
       eval_first_state = eval_env.reset(reset_keys)
-      return unroll(
+      return unroll_policy(
         ppo_network,
         normalizer_params,
         params,

@@ -1,6 +1,6 @@
 from functools import partial
 
-from utils.save_load import load_config
+from utils.save_load import load_config, save_params, record
 from train.train_ppo import train_ppo
 from networks.ppo import make_ppo_network
 
@@ -20,7 +20,13 @@ def main():
     
     env = envs.get_environment(params['enviroment']['name'],**params['enviroment']['enviroment_params'])
 
-    train_ppo(make_ppo_network_partial=make_ppo_network_partial,environment=env, **params['train'])
+    mk_policy, norm_params, policy_params, metrics = train_ppo(make_ppo_network_partial=make_ppo_network_partial,environment=env, **params['train'])
+
+    save_params((norm_params,policy_params), path="data/go1/params/default/params.pkl")
+
+    print("Training complete")
+
+    record(env, mk_policy(0), 0, render=True, path="data/go1/rollouts/default/rollout.pkl")
 
 
 if __name__ == "__main__":

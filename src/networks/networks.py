@@ -5,6 +5,7 @@ from flax import linen
 import dataclasses
 
 from networks.feed_forward import FeedForward
+from networks.lstm import LSTM
 
 @dataclasses.dataclass
 class Network:
@@ -12,6 +13,7 @@ class Network:
   hasHiddenState: bool
   init: Callable[..., Any]
   apply: Callable[..., Any]
+
 
 def activation_fn_selector(activation: str):
   if activation == 'relu':
@@ -54,3 +56,34 @@ def make_feed_forward(
       apply=apply)
   
   return new_feed_forward
+
+def make_lstm(
+    input_size: int,
+    output_size: int = None,
+    hidden_layer_sizes: Sequence[int] = (256, 256),
+    name: str = 'dense',
+    learnable_hidden_state: bool = True,
+    activation: Optional[str] = None,
+    activate_final: Optional[bool] = None
+    ) -> Network:
+
+  if output_size == None:
+    layers = list(hidden_layer_sizes)
+    output_size = hidden_layer_sizes[-1]
+  else:
+    layers = list(jp.concat((jp.array(hidden_layer_sizes),jp.array([output_size]))))
+
+  policy_module = LSTM(name=name, learnable_hidden_state=learnable_hidden_state, layer_sizes=layers)
+
+  def apply(params, data, hidden):
+    return policy_module.apply(params, data, hidden)
+
+  dummy_input = jp.zeros((1,1,input_size))
+
+  new_lstm = Network(
+      shape=(input_size, output_size),
+      hasHiddenState=True,
+      init=lambda key: policy_module.init(key, dummy_input, None),
+      apply=apply)
+  
+  return new_lstm

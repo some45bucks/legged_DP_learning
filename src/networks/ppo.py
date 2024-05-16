@@ -2,7 +2,7 @@ from jax import numpy as jp
 from typing import Any, Tuple, Sequence, Callable
 from brax.training import distribution
 from networks.networks import Network
-from networks.networks import make_feed_forward
+from networks.networks import make_feed_forward, make_lstm
 from brax.training.acme import running_statistics
 import flax
 
@@ -14,7 +14,6 @@ class ppo_network:
     policy_network: Network
     value_network: Network
     action_distribution: distribution.ParametricDistribution
-    reset_hidden: Callable[..., Any]
 
 @flax.struct.dataclass
 class ppo_network_params:
@@ -28,7 +27,7 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
 
     if head_name == 'lstm':
         print("LSTM network head")
-        raise NotImplementedError("LSTM network head not implemented")
+        head_network = make_lstm(input,name=head_name,**head_params)
     elif head_name == 'transformer':
         print("Transformer network head")
         raise NotImplementedError("Transformer network head not implemented")
@@ -45,34 +44,26 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
         head_network, 
         policy_network, 
         value_network, 
-        ppo_distribution,
-        lambda x: None)
+        ppo_distribution)
 
-class infrence_fn():
 
-    deterministic = False
+def make_ppo_policy(ppo_network: ppo_network,normalizer_params: running_statistics.RunningStatisticsState ,ppo_params: ppo_network_params, key: jp.ndarray):
 
-    def __init__(self, ppo_network: ppo_network) -> None:
-        self.ppo_network = ppo_network
+    [key_hold] = key
 
-    def __call__(self,normalizer_params: running_statistics.RunningStatisticsState ,ppo_params: ppo_network_params):
+    def policy(observations: jp.ndarray, hidden: jp.ndarray) -> Tuple[jp.array, jp.array, Any]:
 
-        def policy(observations: jp.ndarray, hidden: jp.ndarray, key: jp.ndarray) -> Tuple[jp.array, jp.array, Any]:
+        observations = ppo_network.normalizer(observations, normalizer_params)
+        x, new_hidden = ppo_network.head_network.apply(ppo_params.head, hidden, observations)
+        logits, _ = ppo_network.policy_network.apply(ppo_params.policy, None, x)
 
-            observations = self.ppo_network.normalizer(observations, normalizer_params)
-            x, new_hidden = self.ppo_network.head_network.apply(ppo_params.head, hidden, observations)
-            logits, _ = self.ppo_network.policy_network.apply(ppo_params.policy, None, x)
+        key_hold[0], use = jp.split(key_hold[0], 2)
+        
+        raw_actions = ppo_network.action_distribution.sample_no_postprocessing(logits, use)
 
-            if self.deterministic:
-                return self.ppo_network.action_distribution.mode(logits), new_hidden, {}
-            
-            raw_actions = self.ppo_network.action_distribution.sample_no_postprocessing(logits, key)
-            
-            log_prob = self.ppo_network.action_distribution.log_prob(logits, raw_actions)
+        postprocessed_actions = ppo_network.action_distribution.postprocess(raw_actions)
+        
+        return postprocessed_actions, new_hidden
 
-            postprocessed_actions = self.ppo_network.action_distribution.postprocess(raw_actions)
-            
-            return postprocessed_actions, new_hidden, {'log_prob': log_prob,'raw_action': raw_actions}
-
-        return policy
+    return policy
 

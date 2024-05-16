@@ -22,13 +22,12 @@ import jax
 import numpy as np
 import optax
 
-from networks.ppo import ppo_network, ppo_network_params, make_ppo_policy
+from networks.ppo import ppo_network, ppo_network_params, infrence_fn
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
 from train.losses import compute_ppo_loss
 from envs.hidden_state_wrapper import HiddenStateWrapper
 from rendering.display import get_progress_fn
-from utils.save_load import save_params
 
 InferenceParams = Tuple[running_statistics.NestedMeanStd, Params]
 Metrics = types.Metrics
@@ -61,10 +60,7 @@ def wrap(env, episode_length, action_repeat, randomization_fn=None):
   
   return env
 
-def save_ppo_params(steps ,params: Params,name):
-  save_params(params,f'data/go1/{name}/_ppo_params_{steps}.pkl')
-
-def train_ppo(
+def train_env(
     make_ppo_network_partial: Callable[..., ppo_network],
     environment: envs.Env,
     num_timesteps: int,
@@ -91,7 +87,7 @@ def train_ppo(
     deterministic_eval: bool = False,
     progress_fn: Callable[[int, Metrics], None] = get_progress_fn(),
     eval_env: Optional[envs.Env] = None,
-    policy_params_fn: Callable[..., None] = save_ppo_params,
+    policy_params_fn: Callable[..., None] = lambda *args: None,
     randomization_fn: Optional[Callable[[base.System, jp.ndarray], Tuple[base.System, base.System]]] = None,
 ):
   
@@ -324,7 +320,7 @@ def train_ppo(
       logging.info(metrics)
       progress_fn(current_step, metrics)
       params = _unpmap((training_state.normalizer_params,training_state.params))
-      policy_params_fn(current_step, params, name)
+      policy_params_fn(current_step, None, params)
 
   total_steps = current_step
   assert total_steps >= num_timesteps
@@ -335,5 +331,4 @@ def train_ppo(
 
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()
-  mk_policy = functools.partial(make_ppo_policy, ppo_network=ppo_net, normalizer_params=_unpmap(training_state.normalizer_params), params=_unpmap(training_state.params))
-  return mk_policy, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), metrics
+  return (None, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), metrics)

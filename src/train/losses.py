@@ -8,7 +8,7 @@ from brax import envs
 from brax.training.acme import running_statistics
 from networks.ppo import ppo_network, ppo_network_params
 
-from train.acting import unroll
+from train.acting import unroll_policy
 
 _PMAP_AXIS_NAME = 'i'
 
@@ -88,7 +88,7 @@ def compute_ppo_loss(
 
     key1, key2 = jax.random.split(rng)
 
-    final_state, data = unroll(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
+    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
 
     normalizer_params = running_statistics.update(
         normalizer_params,
@@ -149,5 +149,7 @@ def compute_ppo_loss(
           'entropy_loss': entropy_loss
         },
         'state_info':{
-          'final_state': final_state        }
+          'final_state': final_state 
+        },
+        'normalizer_params': normalizer_params
     }
