@@ -1,6 +1,11 @@
 import matplotlib.pyplot as plt
 from IPython.display import clear_output, display, HTML
 from datetime import datetime
+import mediapy as media
+
+def render_rollout(env, rollout, render_every=1, title=''):
+    media.show_video(env.render(rollout[::render_every], camera='tracking'),title=title,fps=1.0 / env.dt / render_every)
+
 
 def get_progress_fn():
     times = []

@@ -1,4 +1,4 @@
-from typing import Any, Tuple
+from typing import Any, Tuple, List
 from typing import Sequence, Callable
 from brax.training.types import Params, PRNGKey, NamedTuple
 import flax
@@ -7,6 +7,7 @@ import jax.numpy as jp
 from brax import envs
 from brax.training.acme import running_statistics
 from networks.ppo import ppo_network, ppo_network_params
+from networks.networks import Network
 
 from train.acting import unroll_policy
 
@@ -95,7 +96,7 @@ def compute_ppo_loss(
         data.observation,
         pmap_axis_name=_PMAP_AXIS_NAME)
 
-    next_observation = ppo_network.normalizer(data.next_observation[-1], normalizer_params)
+    next_observation = data.next_observation[-1]
 
     if data.next_hidden_state is None:
       hidden, _ = ppo_network.head_network.apply(params.head, next_observation, None)
@@ -150,6 +151,37 @@ def compute_ppo_loss(
         },
         'state_info':{
           'final_state': final_state 
+        },
+        'normalizer_params': normalizer_params
+    }
+
+
+def compute_env_loss(
+    net_params: Tuple[jp.ndarray, jp.ndarray],
+    type_params: Sequence[jp.ndarray],
+    data_chunk_id: int,
+    normalizer_params: Any,
+    rng: jp.ndarray,
+    network: Tuple[Network, Network],
+    env: envs.Env,
+    train_data: List[envs.State],
+    unroll_length: int = 20) -> Tuple[jp.ndarray, Any]:
+
+    key1, key2 = jax.random.split(rng)
+
+    # final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
+
+    normalizer_params = running_statistics.update(
+        normalizer_params,
+        data.observation,
+        pmap_axis_name=_PMAP_AXIS_NAME)
+
+    
+
+    total_loss = 0
+    return total_loss, {
+       'loss_metrics':{
+          'total_loss': total_loss,
         },
         'normalizer_params': normalizer_params
     }

@@ -26,7 +26,7 @@ from networks.ppo import ppo_network, ppo_network_params, make_ppo_policy
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
 from train.losses import compute_ppo_loss
-from envs.hidden_state_wrapper import HiddenStateWrapper
+from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper
 from rendering.display import get_progress_fn
 from utils.save_load import save_params
 
@@ -55,14 +55,17 @@ def _strip_weak_type(tree):
     return leaf.astype(leaf.dtype)
   return jax.tree_util.tree_map(f, tree)
 
-def wrap(env, episode_length, action_repeat, randomization_fn=None):
+def wrap(env, episode_length, action_repeat, randomization_fn=None, normalize=None):
   env = HiddenStateWrapper(env)
   env = envs.training.wrap(env, episode_length, action_repeat, randomization_fn)
+  if normalize != None:
+    env = AutoNormWrapper(env,normalize)
   
   return env
 
-def save_ppo_params(steps ,params: Params,name):
-  save_params(params,f'data/go1/{name}/_ppo_params_{steps}.pkl')
+def save_ppo_params(steps ,params: Params,name, param_path):
+  print(f'Saving params... name:{name} steps:{steps}')
+  save_params(params,f'{param_path}_ppo_params_{steps}.pkl')
 
 def train_ppo(
     make_ppo_network_partial: Callable[..., ppo_network],
@@ -88,11 +91,11 @@ def train_ppo(
     reward_scaling: float = 1.0,
     clipping_epsilon: float = 0.3,
     gae_lambda: float = 0.95,
-    deterministic_eval: bool = False,
     progress_fn: Callable[[int, Metrics], None] = get_progress_fn(),
     eval_env: Optional[envs.Env] = None,
     policy_params_fn: Callable[..., None] = save_ppo_params,
     randomization_fn: Optional[Callable[[base.System, jp.ndarray], Tuple[base.System, base.System]]] = None,
+    param_path: str = 'data/go1/default/params',
 ):
   
   assert batch_size * num_minibatches % num_envs == 0
@@ -152,17 +155,16 @@ def train_ppo(
 
   ppo_net = make_ppo_network_partial(
       input = environment.observation_size,
-      output = environment.action_size,
-      normalizer = normalize)
+      output = environment.action_size)
 
-  env = wrap(environment, episode_length, action_repeat, randomization_fn)
+  env = wrap(environment, episode_length, action_repeat, randomization_fn, normalize)
 
   reset_fn = jax.jit(jax.vmap(env.reset))
   key_envs = jax.random.split(key_env, num_envs // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
 
-  env_state = reset_fn(key_envs)
+  env_state = reset_fn(key_envs,None)
 
   optimizer = optax.adam(learning_rate=learning_rate)
 
@@ -279,11 +281,12 @@ def train_ppo(
         randomization_fn, rng=jax.random.split(eval_key, num_eval_envs)
     )
 
-  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn)
+  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn, normalize=None)
 
   evaluator_fn = evaluator(
       eval_env,
       ppo_net,
+      normalize,
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
@@ -315,7 +318,7 @@ def train_ppo(
           lambda x, s: jax.random.split(x[0], s),
           in_axes=(0, None))(key_envs, key_envs.shape[1])
 
-      env_state = reset_fn(key_envs) if num_resets_per_eval > 0 else env_state
+      env_state = reset_fn(key_envs, training_state.normalizer_params) if num_resets_per_eval > 0 else env_state
 
     if process_id == 0:
       # Run evals.
@@ -324,7 +327,7 @@ def train_ppo(
       logging.info(metrics)
       progress_fn(current_step, metrics)
       params = _unpmap((training_state.normalizer_params,training_state.params))
-      policy_params_fn(current_step, params, name)
+      policy_params_fn(current_step, params, name, param_path)
 
   total_steps = current_step
   assert total_steps >= num_timesteps
@@ -335,5 +338,5 @@ def train_ppo(
 
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()
-  mk_policy = functools.partial(make_ppo_policy, ppo_network=ppo_net, normalizer_params=_unpmap(training_state.normalizer_params), params=_unpmap(training_state.params))
-  return mk_policy, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), metrics
+  policy = make_ppo_policy(ppo_network=ppo_net, ppo_params=_unpmap(training_state.params))
+  return policy, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), metrics

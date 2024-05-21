@@ -9,7 +9,6 @@ import flax
 @flax.struct.dataclass
 class ppo_network:
     has_hidden_state: bool
-    normalizer: Callable[..., Any]
     head_network: Network
     policy_network: Network
     value_network: Network
@@ -21,7 +20,7 @@ class ppo_network_params:
     policy: jp.ndarray
     value: jp.ndarray
 
-def make_ppo_network(head_name,input,output,head_params,value_params,policy_params,normalizer) -> ppo_network:
+def make_ppo_network(head_name,input,output,head_params,value_params,policy_params) -> ppo_network:
     
     ppo_distribution = distribution.NormalTanhDistribution(event_size=output)
 
@@ -40,26 +39,20 @@ def make_ppo_network(head_name,input,output,head_params,value_params,policy_para
 
     return ppo_network(
         head_network.hasHiddenState,
-        normalizer,
         head_network, 
         policy_network, 
         value_network, 
         ppo_distribution)
 
 
-def make_ppo_policy(ppo_network: ppo_network,normalizer_params: running_statistics.RunningStatisticsState ,ppo_params: ppo_network_params, key: jp.ndarray):
+def make_ppo_policy(ppo_params: ppo_network_params,ppo_network: ppo_network):
 
-    [key_hold] = key
+    def policy(observations: jp.ndarray, hidden: jp.ndarray, rng) -> Tuple[jp.array, jp.array, Any]:
 
-    def policy(observations: jp.ndarray, hidden: jp.ndarray) -> Tuple[jp.array, jp.array, Any]:
-
-        observations = ppo_network.normalizer(observations, normalizer_params)
-        x, new_hidden = ppo_network.head_network.apply(ppo_params.head, hidden, observations)
-        logits, _ = ppo_network.policy_network.apply(ppo_params.policy, None, x)
-
-        key_hold[0], use = jp.split(key_hold[0], 2)
+        x, new_hidden = ppo_network.head_network.apply(ppo_params.head, observations, hidden)
+        logits, _ = ppo_network.policy_network.apply(ppo_params.policy, x, None)
         
-        raw_actions = ppo_network.action_distribution.sample_no_postprocessing(logits, use)
+        raw_actions = ppo_network.action_distribution.sample_no_postprocessing(logits, rng)
 
         postprocessed_actions = ppo_network.action_distribution.postprocess(raw_actions)
         

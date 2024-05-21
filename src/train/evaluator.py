@@ -8,20 +8,22 @@ from jax import numpy as jp
 
 from train.acting import unroll_policy
 from networks.ppo import ppo_network, ppo_network_params
+from envs.custom_wrappers import AutoNormWrapper
 
 class evaluator:
   """Class to run evaluations."""
 
-  def __init__(self, eval_env: envs.Env,  ppo_network: ppo_network, num_eval_envs: int,
+  def __init__(self, eval_env: envs.Env,  ppo_network: ppo_network, norm, num_eval_envs: int,
                episode_length: int, action_repeat: int, key: PRNGKey):
     self._key = key
     self._eval_walltime = 0
 
     eval_env = envs.training.EvalWrapper(eval_env)
+    eval_env = AutoNormWrapper(eval_env,norm)
 
     def generate_eval_unroll(normalizer_params: Any, params: Any, key: PRNGKey) -> envs.State:
       reset_keys = jax.random.split(key, num_eval_envs)
-      eval_first_state = eval_env.reset(reset_keys)
+      eval_first_state = eval_env.reset(reset_keys, normalizer_params)
       return unroll_policy(
         ppo_network,
         normalizer_params,

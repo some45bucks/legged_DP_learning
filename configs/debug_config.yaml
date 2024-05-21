@@ -1,5 +1,5 @@
 ---
-  network:
+  agent_network:
     name: 'default'
     head_params:
       hidden_layer_sizes:
@@ -17,7 +17,19 @@
           - 32
         activation: 'relu'
         activate_final: False
-  train:
+  env_network:
+    name: 'default'
+    in_params:
+      hidden_layer_sizes:
+        - 32
+      activation: 'relu'
+      activate_final: False
+    out_params:
+      hidden_layer_sizes:
+        - 32
+      activation: 'relu'
+      activate_final: False
+  agent_train:
     name: 'default'
     num_timesteps: 11000
     episode_length: 100
@@ -39,7 +51,18 @@
     reward_scaling: 1.0
     clipping_epsilon: 0.3
     gae_lambda: 0.95
-    deterministic_eval: True
+  env_train:
+    name: 'default'
+    num_envs: 8
+    learning_rate: 0.0003
+    seed: 0
+    unroll_length: 10
+    batch_size: 16
+    type_size: 4
+    type_split_every: 20
+    data_loops: 10
+    num_minibatches: 32
+    normalize_observations: True
   enviroment:
     name: 'joy_stick_env'
     enviroment_params:

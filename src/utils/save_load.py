@@ -15,13 +15,19 @@ def load_params(path='params.pkl'):
     with open(path, 'rb') as file:
         return pkl.load(file)
     
-def record(env, policy, rng, render, path='rollout.pkl', command=None):
+def load_rollout(path):
+    with open(path, 'rb') as file:
+        return pkl.load(file)
+    
+def record(env, policy, rng, path='/', command=None):
     jit_reset = jax.jit(env.reset)
     jit_step = jax.jit(env.step)
 
     jit_inference_fn = jax.jit(policy)
 
-    state = jit_reset(rng)
+    key1, key2 = jax.random.split(jax.random.PRNGKey(rng))
+
+    state = jit_reset(key1)
 
     if not command is None:
         the_command = jp.array(command)
@@ -31,19 +37,17 @@ def record(env, policy, rng, render, path='rollout.pkl', command=None):
 
     done = False
 
+    hidden_state = state.info['hidden_state']
+
     while not done:
-        act_rng, rng = jax.random.split(rng)
-        ctrl, _ = jit_inference_fn(state.obs, act_rng)
+        act_rng, key2 = jax.random.split(key2)
+        ctrl, hidden_state = jit_inference_fn(state.obs, hidden_state, act_rng)
         state = jit_step(state, ctrl)
         rollout.append(state.pipeline_state)
-
-        if render:
-            env.render()
-
         done = state.done
 
     #save the rollout
-    with open(path, 'wb') as file:
+    with open(path+f"rollout_{rng}.pkl", 'wb') as file:
         pkl.dump(rollout, file)
 
     return rollout

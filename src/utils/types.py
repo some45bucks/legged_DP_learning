@@ -26,7 +26,7 @@ from networks.ppo import ppo_network, ppo_network_params, infrence_fn
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
 from train.losses import compute_ppo_loss
-from envs.hidden_state_wrapper import HiddenStateWrapper
+from envs.custom_wrappers import HiddenStateWrapper
 
 @flax.struct.dataclass
 class TrainingState:

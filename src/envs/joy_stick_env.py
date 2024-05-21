@@ -62,9 +62,10 @@ class JoyStickEnv(PipelineEnv):
       obs_noise: float = 0.05,
       action_scale: float = -0.3,
       kick_vel: float = 0.05,
+      scene_path: str = 'data/go1/',
       **kwargs,
   ):
-    path = epath.Path('data/go1/go1_scene.xml') 
+    path = epath.Path(f'{scene_path}go1_scene.xml') 
     sys = mjcf.load(path.as_posix())
     self._dt = 0.02  # this environment is 50 fps
     sys = sys.tree_replace({'opt.timestep': 0.004, 'dt': 0.004})
@@ -381,5 +382,5 @@ class JoyStickEnv(PipelineEnv):
   def render(
       self, trajectory: List[base.State], camera: str | None = None
   ) -> Sequence[np.ndarray]:
-    camera = camera or 'track'
+    camera = camera or 'tracking'
     return super().render(trajectory, camera=camera)
