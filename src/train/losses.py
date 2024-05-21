@@ -169,7 +169,7 @@ def compute_env_loss(
 
     key1, key2 = jax.random.split(rng)
 
-    # final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
+    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
 
     normalizer_params = running_statistics.update(
         normalizer_params,
