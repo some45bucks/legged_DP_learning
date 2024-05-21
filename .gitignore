@@ -1,4 +1,6 @@
 policies/
+rollouts/
+network_params/
 
 # Python
 __pycache__/
