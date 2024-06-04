@@ -53,7 +53,7 @@ from flax import linen
 from typing import Any, Callable, Sequence, Tuple
 import dataclasses
 
-class DataMimicEnv(PipelineEnv):
+class JoyStickEnv(PipelineEnv):
   """Environment for training the quadruped joystick policy in MJX."""
 
   def __init__(
@@ -62,9 +62,10 @@ class DataMimicEnv(PipelineEnv):
       obs_noise: float = 0.05,
       action_scale: float = -0.3,
       kick_vel: float = 0.05,
+      scene_path: str = 'data/go1/',
       **kwargs,
   ):
-    path = epath.Path('data/go1/go1_scene.xml') 
+    path = epath.Path(f'{scene_path}go1_scene.xml') 
     sys = mjcf.load(path.as_posix())
     self._dt = 0.02  # this environment is 50 fps
     sys = sys.tree_replace({'opt.timestep': 0.004, 'dt': 0.004})
@@ -123,25 +124,39 @@ class DataMimicEnv(PipelineEnv):
     self._foot_radius = 0.023
     self._nv = sys.nv
 
-    self.normalize = running_statistics.normalize
-    self.normParams = running_statistics.init_state(specs.Array(self.out_num, jp.dtype('float32')))
+  def set_phys_state(self, state: base.State):
+    """Sets the physics state of the environment."""
+    self._state = state
+    return state
 
   def reset(self, rng: jax.Array) -> State:  # pytype: disable=signature-mismatch
     rng, key = jax.random.split(rng)
 
     pipeline_state = self.pipeline_init(self._init_q, jp.zeros(self._nv))
 
-    obs_history = jp.zeros(15 * 31)
-    
-    obs = self._get_obs(pipeline_state, obs_history)
+    state_info = {
+        'rng': rng,
+        'last_act': jp.zeros(12),
+        'last_vel': jp.zeros(12),
+        'command': self.sample_command(key),
+        'last_contact': jp.zeros(4, dtype=bool),
+        'feet_air_time': jp.zeros(4),
+        'rewards': {k: 0.0 for k in self.reward_config['scales'].keys()},
+        'kick': jp.array([0.0, 0.0]),
+        'step': 0
+    }
 
-    state = State(pipeline_state, obs)
-    
+    obs_history = jp.zeros(15 * 31)  # store 15 steps of history
+    obs = self._get_obs(pipeline_state, state_info, obs_history)
+    reward, done = jp.zeros(2)
+    metrics = {'total_dist': 0.0}
+    for k in state_info['rewards']:
+      metrics[k] = state_info['rewards'][k]
+    state = State(pipeline_state, obs, reward, done, metrics, state_info)  # pytype: disable=wrong-arg-types
     return state
 
   def step(self, state: State, action: jax.Array) -> State:  # pytype: disable=signature-mismatch
     rng, cmd_rng, kick_noise_2 = jax.random.split(state.info['rng'], 3)
-
     # kick
     push_interval = 10
     kick_theta = jax.random.uniform(kick_noise_2, maxval=2 * jp.pi)
@@ -149,38 +164,113 @@ class DataMimicEnv(PipelineEnv):
     kick *= jp.mod(state.info['step'], push_interval) == 0
     qvel = state.pipeline_state.qvel  # pytype: disable=attribute-error
     qvel = qvel.at[:2].set(kick * self._kick_vel + qvel[:2])
-
     state = state.tree_replace({'pipeline_state.qvel': qvel})
 
     # physics step
     motor_targets = self._default_pose + action * self._action_scale
-
+    # motor_targets = jp.clip(motor_targets, self.lowers, self.uppers)
     pipeline_state = self.pipeline_step(state.pipeline_state, motor_targets)
+    x, xd = pipeline_state.x, pipeline_state.xd
 
+    # observation data
     obs = self._get_obs(pipeline_state, state.info, state.obs)
+    joint_angles = pipeline_state.q[7:]
+    joint_vel = pipeline_state.qd[6:]
 
+    # foot contact data based on z-position
+    foot_pos = pipeline_state.site_xpos[self._feet_site_id]  # pytype: disable=attribute-error
+    foot_contact_z = foot_pos[:, 2] - self._foot_radius
+    contact = foot_contact_z < 1e-3  # a mm or less off the floor
+    contact_filt_mm = contact | state.info['last_contact']
+    contact_filt_cm = (foot_contact_z < 3e-2) | state.info['last_contact']
+    first_contact = (state.info['feet_air_time'] > 0) * contact_filt_mm
+    state.info['feet_air_time'] += self.dt
+
+    # done if joint limits are reached or robot is falling
+    up = jp.array([0.0, 0.0, 1.0])
+    done = jp.dot(math.rotate(up, x.rot[self._torso_idx - 1]), up) < 0
+    # done |= jp.any(joint_angles < self.lowers)
+    # done |= jp.any(joint_angles > self.uppers)
+    done |= pipeline_state.x.pos[self._torso_idx - 1, 2] < 0.18
+
+    # reward
+    rewards = {
+        'tracking_lin_vel': (
+            self._reward_tracking_lin_vel(state.info['command'], x, xd)
+        ),
+        'tracking_ang_vel': (
+            self._reward_tracking_ang_vel(state.info['command'], x, xd)
+        ),
+        'lin_vel_z': self._reward_lin_vel_z(xd),
+        'ang_vel_xy': self._reward_ang_vel_xy(xd),
+        'orientation': self._reward_orientation(x),
+        'torques': self._reward_torques(pipeline_state.qfrc_actuator),  # pytype: disable=attribute-error
+        'action_rate': self._reward_action_rate(action, state.info['last_act']),
+        'stand_still': self._reward_stand_still(
+            state.info['command'], joint_angles,
+        ),
+        'feet_air_time': self._reward_feet_air_time(
+            state.info['feet_air_time'],
+            first_contact,
+            state.info['command'],
+        ),
+        'foot_slip': self._reward_foot_slip(pipeline_state, contact_filt_cm),
+        'termination': self._reward_termination(done, state.info['step']),
+    }
+    rewards = {
+        k: v * self.reward_config['scales'][k] for k, v in rewards.items()
+    }
+    reward = jp.clip(sum(rewards.values()) * self.dt, -10000.0, 10000.0)
+
+    # state management
+    state.info['kick'] = kick
+    state.info['last_act'] = action
+    state.info['last_vel'] = joint_vel
+    state.info['feet_air_time'] *= ~contact_filt_mm
+    state.info['last_contact'] = contact
+    state.info['rewards'] = rewards
+    state.info['step'] += 1
+    state.info['rng'] = rng
+
+    # sample new command if more than 500 timesteps achieved
+    state.info['command'] = jp.where(
+        state.info['step'] > 500,
+        self.sample_command(cmd_rng),
+        state.info['command'],
+    )
+    # reset the step counter when done
+    state.info['step'] = jp.where(
+        done | (state.info['step'] > 500), 0, state.info['step']
+    )
+
+    # log total displacement as a proxy metric
+    state.metrics['total_dist'] = math.normalize(x.pos[self._torso_idx - 1])[1]
+    state.metrics.update(state.info['rewards'])
+
+    done = jp.float32(done)
 
     state = state.replace(
-        pipeline_state=pipeline_state, obs=obs
+        pipeline_state=pipeline_state, obs=obs, reward=reward, done=done
     )
     return state
 
   def _get_obs(
       self,
       pipeline_state: base.State,
-      command: jax.Array,
-      last_action: jax.Array,
+      state_info: dict[str, Any],
       obs_history: jax.Array,
   ) -> jax.Array:
     inv_torso_rot = math.quat_inv(pipeline_state.x.rot[0])
     local_rpyrate = math.rotate(pipeline_state.xd.ang[0], inv_torso_rot)
+    
+    normal_command = state_info['command'] * jp.array([2.0, 2.0, 0.25])
 
     obs = jp.concatenate([
-        jp.array([local_rpyrate[2]]) * 0.25,                
-        math.rotate(jp.array([0, 0, -1]), inv_torso_rot),    
-        command,                                     
-        pipeline_state.q[7:] - self._default_pose,           
-        last_action,                             
+        jp.array([local_rpyrate[2]]) * 0.25,                 # yaw rate
+        math.rotate(jp.array([0, 0, -1]), inv_torso_rot),    # projected gravity
+        normal_command,                                      # command
+        pipeline_state.q[7:] - self._default_pose,           # motor angles
+        state_info['last_act'],                              # last action
     ])
 
     obs = jp.clip(obs, -100.0, 100.0)
@@ -274,5 +364,5 @@ class DataMimicEnv(PipelineEnv):
   def render(
       self, trajectory: List[base.State], camera: str | None = None
   ) -> Sequence[np.ndarray]:
-    camera = camera or 'track'
+    camera = camera or 'tracking'
     return super().render(trajectory, camera=camera)

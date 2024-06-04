@@ -24,7 +24,7 @@ import optax
 
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
-from train.losses import compute_env_loss, compute_type_loss
+from train.losses import compute_env_loss, compute_env_loss_type
 from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper
 from rendering.display import get_progress_fn
 from utils.save_load import save_params
@@ -43,7 +43,7 @@ class TrainingState:
   net_optimizer_state: optax.OptState
   type_optimizer_state: optax.OptState
   params: Tuple[jp.ndarray, jp.ndarray]
-  type_params: Sequence[jp.ndarray]
+  full_type_params: Sequence[jp.ndarray]
   normalizer_params: Tuple[running_statistics.RunningStatisticsState, running_statistics.RunningStatisticsState]
   env_steps: jp.ndarray
 
@@ -59,12 +59,14 @@ def _strip_weak_type(tree):
     return leaf.astype(leaf.dtype)
   return jax.tree_util.tree_map(f, tree)
 
+
 def wrap(env, normalize=None):
   env = envs.training.VmapWrapper(env)
-  if normalize != None:
-    env = AutoNormWrapper(env,normalize)
+  # if normalize != None:
+  #   env = AutoNormWrapper(env,normalize)
   
   return env
+
 
 def save_ppo_params(steps ,params: Params,name, param_path):
   print(f'Saving params... name:{name} steps:{steps}')
@@ -76,11 +78,9 @@ def train_env(
     make_out_part: Callable[..., Network],  
     environment: envs.Env,
     name: str = 'Default',
-    num_envs: int = 1,
     learning_rate: float = 1e-4,
     seed: int = 0,
     unroll_length: int = 10,
-    batch_size: int = 32,
     type_size: int = 4,
     type_split_every: int = 20, 
     data_loops: int = 100,
@@ -92,7 +92,7 @@ def train_env(
     param_path: str = 'data/go1/default/params',
 ):
   
-  train_data = data_sequence(type_split_every,type_size,train_data)
+  train_data = data_sequence(type_split_every,unroll_length,type_size,train_data)
 
   data_length = len(train_data)
 
@@ -102,6 +102,8 @@ def train_env(
   process_id = jax.process_index()
   local_device_count = jax.local_device_count()
   local_devices_to_use = local_device_count
+
+  assert data_length % (num_minibatches // process_count) == 0, f"Data length ({data_length}) must be divisible by num_minibatches ({num_minibatches}) // process_count ({process_count})"
   
   logging.info(
       'Device count: %d, process count: %d (id %d), local device count: %d, '
@@ -120,11 +122,11 @@ def train_env(
 
   del global_key
 
-  assert num_envs % device_count == 0
+  assert num_minibatches % device_count == 0
 
   v_randomization_fn = None
   if randomization_fn is not None:
-    randomization_batch_size = num_envs // local_device_count
+    randomization_batch_size = num_minibatches // local_device_count
     # all devices gets the same randomization rng
     randomization_rng = jax.random.split(key_env, randomization_batch_size)
     v_randomization_fn = functools.partial(
@@ -136,13 +138,12 @@ def train_env(
     normalize = running_statistics.normalize
 
   env = wrap(environment, normalize)
-
   reset_fn = jax.jit(jax.vmap(env.reset))
-  key_envs = jax.random.split(key_env, num_envs // process_count)
+  key_envs = jax.random.split(key_env, num_minibatches // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
-
-  env_state = reset_fn(key_envs,None)
+  
+  reset_state = reset_fn(key_envs)
 
   net_optimizer = optax.adam(learning_rate=learning_rate)
   type_optimizer = optax.adam(learning_rate=learning_rate)
@@ -155,85 +156,94 @@ def train_env(
       input_size = environment.observation_size + type_size,
       output_size = environment.observation_size)
   
+  main_slice = [-1,-1]
+
   loss_fn = functools.partial(
     compute_env_loss,
     network=(in_net, out_net),
     env=env,
-    unroll_length=unroll_length,
-    train_data=train_data
+    reset_state = reset_state,
+    slice = main_slice
+    )
+  
+  loss_fn_type = functools.partial(
+    compute_env_loss_type,
+    network=(in_net, out_net),
+    env=env,
+    reset_state = reset_state,
+    slice = main_slice
     )
 
   net_gradient_update_fn = gradient_update(loss_fn, net_optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
-  type_gradient_update_fn = gradient_update(loss_fn, type_optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
+  type_gradient_update_fn = gradient_update(loss_fn_type, type_optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
   
-  def minibatch_step(carry, xs):
-    net_optimizer_state, type_optimizer_state, net_params, type_params, normalizer_params, data_chunk_id, key = carry
+  def step(net_optimizer_state, type_optimizer_state, net_params, type_params, normalizer_params, data_chunk, key):
     key, key_loss= jax.random.split(key)
+
+    print("starting step compile...")
 
     (_, out_data), net_params, net_optimizer_state = net_gradient_update_fn(
         net_params,
         type_params,
-        data_chunk_id,
+        data_chunk,
         normalizer_params,
         key_loss,
         optimizer_state=net_optimizer_state)
-    
-    (_, out_data), type_params, type_optimizer_state = type_gradient_update_fn(
-        net_params,
+
+    (_, out_data), full_type_params, type_optimizer_state = type_gradient_update_fn(
         type_params,
-        data_chunk_id,
+        net_params,
+        data_chunk,
         normalizer_params,
         key_loss,
         optimizer_state=type_optimizer_state)
-
-    return (net_optimizer_state, type_optimizer_state, net_params, type_params, out_data['normalizer_params'], data_chunk_id+1, key), out_data['loss_metrics']
-
-  def training_step(
-      carry: Tuple[TrainingState, int, PRNGKey],
-      unused_t) -> Tuple[Tuple[TrainingState, int, PRNGKey], Metrics]:
-    training_state, data_chunk_id, key = carry
-    key_grad, new_key = jax.random.split(key, 2)    
-
-    (net_optimizer_state, type_optimizzer_state, net_params, type_params, norm_params, data_chunk_id, _), loss_metrics = jax.lax.scan(
-        minibatch_step,
-        (training_state.net_optimizer_state, training_state.type_optimizer_state, training_state.params, training_state.type_params, training_state.normalizer_params, data_chunk_id, key_grad), (),
-        length=num_minibatches)
     
+    
+
+    return net_optimizer_state, type_optimizer_state, net_params, full_type_params, out_data['normalizer_params'], out_data['loss_metrics']
+
+  def training_epoch(training_state: TrainingState, data_chunk, key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
+    
+    print("starting training epoch compile...")
+
+    net_optimizer_state, type_optimizzer_state, net_params, full_type_params, norm_params, loss_metrics = step(training_state.net_optimizer_state,
+                                                                                                                    training_state.type_optimizer_state,
+                                                                                                                    training_state.params,
+                                                                                                                    training_state.full_type_params,
+                                                                                                                    training_state.normalizer_params,
+                                                                                                                    data_chunk,
+                                                                                                                    key)
+    print("finished step compile!")
+
     new_training_state = TrainingState(
       net_optimizer_state=net_optimizer_state,
       type_optimizer_state=type_optimizzer_state,
       params=net_params,
-      type_params=type_params,
+      full_type_params=full_type_params,
       normalizer_params=norm_params,
       env_steps=0)
-    
-    return (new_training_state, data_chunk_id, new_key), loss_metrics
-
-  def training_epoch(training_state: TrainingState, data_chunk_id: int,
-                     key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
-    (training_state, data_chunk_id, _), loss_metrics = jax.lax.scan(
-        training_step, (training_state, data_chunk_id, key), (),
-        length=data_length)
 
     loss_metrics = jax.tree_util.tree_map(jp.mean, loss_metrics)
-    return training_state, data_chunk_id, loss_metrics
+
+    return new_training_state, loss_metrics
 
   training_epoch = jax.pmap(training_epoch, axis_name=_PMAP_AXIS_NAME)
 
   # Note that this is NOT a pure jittable method.
   def training_epoch_with_timing(
-      training_state: TrainingState, data_chunk_id: int,
-      key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
+      training_state: TrainingState, data_chunk ,key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
 
-    t = time.time()
-    training_state = _strip_weak_type(training_state)
-    result = training_epoch(training_state, data_chunk_id, key)
-    training_state, data_chunk_id, metrics = _strip_weak_type(result)
+    training_state, data_chunk = _strip_weak_type((training_state, data_chunk))
 
-    metrics = jax.tree_util.tree_map(jp.mean, metrics)
+    result = training_epoch(training_state, data_chunk ,key)
+    if main_slice[0] == 0 and it == 0:
+      print("finished training epoch compile!")
+    training_state, metrics = _strip_weak_type(result)
+
+    metrics = jax.tree_util.tree_map(jp.mean, metrics['total_loss'])
     jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
     
-    return training_state, data_chunk_id, metrics  # pytype: disable=bad-return-type  # py311-upgrade
+    return training_state, metrics  # pytype: disable=bad-return-type  # py311-upgrade
   
   net_params = (
     in_net.init(key_in),
@@ -242,11 +252,11 @@ def train_env(
 
   type_params = train_data.get_params(key_type)
 
-  training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
+  training_state = TrainingState(
       net_optimizer_state=net_optimizer.init(net_params),
       type_optimizer_state=type_optimizer.init(type_params),
       params=net_params,
-      type_params=type_params,
+      full_type_params=type_params,
       normalizer_params=(running_statistics.init_state(
           specs.Array(environment.action_size, jp.dtype('float32'))),
           running_statistics.init_state(
@@ -258,21 +268,28 @@ def train_env(
       jax.local_devices()[:local_devices_to_use])
 
   for it in range(data_loops):
-    data_chunk_id = jp.zeros(1)
+    print(f'Iteration {it}')
     logging.info('starting iteration %s %s', it, time.time() - xt)
+    for i in range(0,data_length, (num_minibatches // process_count)):
 
-    epoch_key, local_key = jax.random.split(local_key)
-    epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
-    (training_state, data_chunk_id, training_metrics) = (
-        training_epoch_with_timing(training_state, data_chunk_id, epoch_keys)
-    )
+      main_slice[0] = i
+      main_slice[1] = i + (num_minibatches // process_count)
 
-    key_envs = jax.vmap(
-        lambda x, s: jax.random.split(x[0], s),
-        in_axes=(0, None))(key_envs, key_envs.shape[1])
+      data_chunk = train_data[main_slice[0]:main_slice[1]]
+
+      epoch_key, local_key = jax.random.split(local_key)
+      epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
+
+      training_state, training_metrics = training_epoch_with_timing(training_state, data_chunk, epoch_keys)
+
+      print(f"data {main_slice[0]}:{main_slice[1]} loss: {training_metrics}")
+      
+      key_envs = jax.vmap(
+          lambda x, s: jax.random.split(x[0], s),
+          in_axes=(0, None))(key_envs, key_envs.shape[1])
 
   # If there was no mistakes the training_state should still be identical on all
   # devices.
   pmap.assert_is_replicated(training_state)
   pmap.synchronize_hosts()
-  return _unpmap(training_state.normalizer_params), _unpmap(training_state.params)
+  return _unpmap(training_state.normalizer_params), _unpmap(training_state.params), _unpmap(training_state.full_type_params)

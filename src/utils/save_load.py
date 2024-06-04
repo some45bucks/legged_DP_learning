@@ -34,6 +34,7 @@ def record(env, policy, rng, path='/', command=None):
         state.info['command'] = the_command
 
     rollout = [state.pipeline_state]
+    actions = []
 
     done = False
 
@@ -42,14 +43,17 @@ def record(env, policy, rng, path='/', command=None):
     while not done:
         act_rng, key2 = jax.random.split(key2)
         ctrl, hidden_state = jit_inference_fn(state.obs, hidden_state, act_rng)
+        actions.append(ctrl)
         state = jit_step(state, ctrl)
         rollout.append(state.pipeline_state)
         done = state.done
 
+    actions.append(actions[-1])
+
     #save the rollout
     with open(path+f"rollout_{rng}.pkl", 'wb') as file:
-        pkl.dump(rollout, file)
+        pkl.dump((rollout, actions), file)
 
-    return rollout
+    return rollout, actions
 
 

@@ -34,7 +34,7 @@
     num_timesteps: 11000
     episode_length: 100
     action_repeat: 1
-    num_envs: 8
+    num_envs: 4
     num_eval_envs: 10
     num_evals: 3
     learning_rate: 0.0003
@@ -53,15 +53,13 @@
     gae_lambda: 0.95
   env_train:
     name: 'default'
-    num_envs: 8
     learning_rate: 0.0003
     seed: 0
     unroll_length: 10
-    batch_size: 16
     type_size: 4
-    type_split_every: 20
-    data_loops: 10
-    num_minibatches: 32
+    type_split_every: 10
+    data_loops: 5
+    num_minibatches: 1
     normalize_observations: True
   enviroment:
     name: 'joy_stick_env'

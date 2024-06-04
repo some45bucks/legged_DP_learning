@@ -6,6 +6,16 @@ import mediapy as media
 def render_rollout(env, rollout, render_every=1, title=''):
     media.show_video(env.render(rollout[::render_every], camera='tracking'),title=title,fps=1.0 / env.dt / render_every)
 
+def pretty_print_object(obj, indent=0):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            print('\t' * indent + str(key))
+            pretty_print_object(value, indent + 1)
+    elif isinstance(obj, list):
+        for value in obj:
+            pretty_print_object(value, indent + 1)
+    else:
+        print('\t' * indent + str(obj))
 
 def get_progress_fn():
     times = []
