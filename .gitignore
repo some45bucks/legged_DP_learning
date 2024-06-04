@@ -1,6 +1,7 @@
 policies/
 rollouts/
 network_params/
+env_params/
 
 # Python
 __pycache__/

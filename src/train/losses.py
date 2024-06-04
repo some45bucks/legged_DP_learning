@@ -8,8 +8,10 @@ from brax import envs
 from brax.training.acme import running_statistics
 from networks.ppo import ppo_network, ppo_network_params
 from networks.networks import Network
+from brax.envs.base import State
 
 from train.acting import unroll_policy
+from utils.data_funcs import extract_q_dq
 
 _PMAP_AXIS_NAME = 'i'
 
@@ -155,33 +157,85 @@ def compute_ppo_loss(
         'normalizer_params': normalizer_params
     }
 
+def MSE_loss(a: jp.ndarray, b: jp.ndarray) -> jp.ndarray:
+    return jp.mean(jp.square(a - b))
 
-def compute_env_loss(
-    net_params: Tuple[jp.ndarray, jp.ndarray],
+def compute_env_loss_type(
     type_params: Sequence[jp.ndarray],
-    data_chunk_id: int,
+    net_params: Tuple[jp.ndarray, jp.ndarray],
+    data_chunk: Sequence[envs.State],
     normalizer_params: Any,
     rng: jp.ndarray,
     network: Tuple[Network, Network],
     env: envs.Env,
-    train_data: List[envs.State],
-    unroll_length: int = 20) -> Tuple[jp.ndarray, Any]:
+    reset_state,
+    slice) -> Tuple[jp.ndarray, Any]:
+   
+   return compute_env_loss(net_params, type_params, data_chunk, normalizer_params, rng, network, env, reset_state, slice)
+
+def compute_env_loss(
+    net_params: Tuple[jp.ndarray, jp.ndarray],
+    type_params: Sequence[jp.ndarray],
+    data_chunk: Sequence[envs.State],
+    normalizer_params: Any,
+    rng: jp.ndarray,
+    network: Tuple[Network, Network],
+    env: envs.Env,
+    reset_state,
+    slice) -> Tuple[jp.ndarray, Any]:
 
     key1, key2 = jax.random.split(rng)
 
-    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
+    net1, net2 = network
 
-    normalizer_params = running_statistics.update(
-        normalizer_params,
-        data.observation,
-        pmap_axis_name=_PMAP_AXIS_NAME)
+    step_fn = jax.vmap(env.step)
 
+    def test(q, qd):
+        return env.pipeline_init(q, qd)
+
+    gen_pipeline = jax.vmap(jax.vmap(test))
+
+    states, actions, start_states = data_chunk
+
+    start_q, start_qd = start_states
+
+    type_params = jp.expand_dims(type_params['params']['0'][slice[0]:slice[1]],0)
+
+    start_pipe = gen_pipeline(start_q, start_qd)
+
+    def step(carry, action):
+      state, rng = carry
+
+      concat_actions =  jp.concatenate((action, type_params),2)
+
+      net_action, _ = net1.apply(net_params[0],concat_actions,  None)
+
+      new_state = step_fn(state,net_action)
+
+      return (new_state,rng), new_state.pipeline_state
+
+    state = State(
+          obs=reset_state.obs,
+          reward=reset_state.reward,
+          done=reset_state.done,
+          info=reset_state.info,
+          pipeline_state=start_pipe,
+          metrics=reset_state.metrics
+      )
     
+    (final_state, rng), new_pipeline =  jax.lax.scan(step, (state, rng), (actions), length=actions.shape[0])
 
-    total_loss = 0
-    return total_loss, {
+    new_states = extract_q_dq([new_pipeline])[0]
+
+    flat_states,_ = jax.tree_util.tree_flatten(states)
+    flat_new_states,_ = jax.tree_util.tree_flatten(new_states)
+
+    loss = MSE_loss(flat_states[0], flat_new_states[0])
+    loss += MSE_loss(flat_states[1], flat_new_states[1])
+
+    return loss, {
        'loss_metrics':{
-          'total_loss': total_loss,
+          'total_loss': loss,
         },
         'normalizer_params': normalizer_params
     }
