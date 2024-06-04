@@ -28,7 +28,6 @@ def extract_q_dq(data):
 class data_sequence(Sequence):
     def __init__(self, chunk_size, unroll_length, type_size, data):
         assert len(data[0]) == len(data[1]), "Data and actions must be the same length" 
-        # assert (len(data[0])-unroll_length) % chunk_size == 0, f"Data length ({len(data[0])}) minus unroll length ({unroll_length}) ({len(data[0])-unroll_length})  must be divisible by chunk size ({chunk_size}) instead has remainder {(len(data[0])-unroll_length) % chunk_size}"
         if len(data[0]) % chunk_size != 0:
             for i in range(chunk_size - (len(data[0]) % chunk_size)):
                 data[0].append(data[0][-1])

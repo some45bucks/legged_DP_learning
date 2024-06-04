@@ -190,10 +190,7 @@ def compute_env_loss(
 
     step_fn = jax.vmap(env.step)
 
-    def test(q, qd):
-        return env.pipeline_init(q, qd)
-
-    gen_pipeline = jax.vmap(jax.vmap(test))
+    gen_pipeline = jax.vmap(jax.vmap(env.pipeline_init))
 
     states, actions, start_states = data_chunk
 
@@ -203,6 +200,14 @@ def compute_env_loss(
 
     start_pipe = gen_pipeline(start_q, start_qd)
 
+    def network_fn(state):
+      input = jp.concatenate(extract_q_dq([state.pipeline_state])[0],-1)
+      concat_input =  jp.concatenate((input, type_params),2)
+      output, _ = net2.apply(net_params[1],concat_input,  None)
+      new_pipe = gen_pipeline(output[:,:,:19],output[:,:,19:])
+      state = state.replace(pipeline_state=new_pipe)
+      return state
+
     def step(carry, action):
       state, rng = carry
 
@@ -211,6 +216,8 @@ def compute_env_loss(
       net_action, _ = net1.apply(net_params[0],concat_actions,  None)
 
       new_state = step_fn(state,net_action)
+
+      new_state = network_fn(new_state)
 
       return (new_state,rng), new_state.pipeline_state
 

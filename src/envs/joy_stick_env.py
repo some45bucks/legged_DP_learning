@@ -123,6 +123,7 @@ class JoyStickEnv(PipelineEnv):
     self._lower_leg_body_id = np.array(lower_leg_body_id)
     self._foot_radius = 0.023
     self._nv = sys.nv
+    self.vel_pos = self._nv + self._init_q.shape[0]
 
   def set_phys_state(self, state: base.State):
     """Sets the physics state of the environment."""

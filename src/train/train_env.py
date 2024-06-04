@@ -153,8 +153,8 @@ def train_env(
       output_size = environment.action_size)
   
   out_net = make_out_part(
-      input_size = environment.observation_size + type_size,
-      output_size = environment.observation_size)
+      input_size = environment.vel_pos + type_size,
+      output_size = environment.vel_pos)
   
   main_slice = [-1,-1]
 
@@ -182,7 +182,7 @@ def train_env(
 
     print("starting step compile...")
 
-    (_, out_data), net_params, net_optimizer_state = net_gradient_update_fn(
+    (_, out_data1), net_params, net_optimizer_state = net_gradient_update_fn(
         net_params,
         type_params,
         data_chunk,
@@ -190,7 +190,7 @@ def train_env(
         key_loss,
         optimizer_state=net_optimizer_state)
 
-    (_, out_data), full_type_params, type_optimizer_state = type_gradient_update_fn(
+    (_, out_data2), full_type_params, type_optimizer_state = type_gradient_update_fn(
         type_params,
         net_params,
         data_chunk,
@@ -198,11 +198,11 @@ def train_env(
         key_loss,
         optimizer_state=type_optimizer_state)
     
-    
+    metrics = (out_data1['loss_metrics'], out_data2['loss_metrics'])
 
-    return net_optimizer_state, type_optimizer_state, net_params, full_type_params, out_data['normalizer_params'], out_data['loss_metrics']
+    return net_optimizer_state, type_optimizer_state, net_params, full_type_params, out_data2['normalizer_params'], metrics
 
-  def training_epoch(training_state: TrainingState, data_chunk, key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
+  def training_epoch(training_state: TrainingState, data_chunk, key: PRNGKey) -> Tuple[TrainingState, Any]:
     
     print("starting training epoch compile...")
 
@@ -228,22 +228,6 @@ def train_env(
     return new_training_state, loss_metrics
 
   training_epoch = jax.pmap(training_epoch, axis_name=_PMAP_AXIS_NAME)
-
-  # Note that this is NOT a pure jittable method.
-  def training_epoch_with_timing(
-      training_state: TrainingState, data_chunk ,key: PRNGKey) -> Tuple[TrainingState, envs.State, Metrics]:
-
-    training_state, data_chunk = _strip_weak_type((training_state, data_chunk))
-
-    result = training_epoch(training_state, data_chunk ,key)
-    if main_slice[0] == 0 and it == 0:
-      print("finished training epoch compile!")
-    training_state, metrics = _strip_weak_type(result)
-
-    metrics = jax.tree_util.tree_map(jp.mean, metrics['total_loss'])
-    jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
-    
-    return training_state, metrics  # pytype: disable=bad-return-type  # py311-upgrade
   
   net_params = (
     in_net.init(key_in),
@@ -280,9 +264,19 @@ def train_env(
       epoch_key, local_key = jax.random.split(local_key)
       epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
 
-      training_state, training_metrics = training_epoch_with_timing(training_state, data_chunk, epoch_keys)
+      training_state, data_chunk = _strip_weak_type((training_state, data_chunk))
 
-      print(f"data {main_slice[0]}:{main_slice[1]} loss: {training_metrics}")
+      result = training_epoch(training_state, data_chunk ,epoch_keys)
+
+      if main_slice[0] == 0 and it == 0:
+        print("finished training epoch compile!")
+
+      training_state, metrics = _strip_weak_type(result)
+
+      training_metrics = jax.tree_util.tree_map(jp.mean, metrics)
+      jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
+
+      print(f"data {main_slice[0]}:{main_slice[1]} network loss: {training_metrics[0]['total_loss']}, type loss: {training_metrics[1]['total_loss']}")
       
       key_envs = jax.vmap(
           lambda x, s: jax.random.split(x[0], s),
