@@ -254,6 +254,8 @@ def train_env(
   for it in range(data_loops):
     print(f'Iteration {it}')
     logging.info('starting iteration %s %s', it, time.time() - xt)
+    av_network_loss = 0
+    av_type_loss = 0
     for i in range(0,data_length, (num_minibatches // process_count)):
 
       main_slice[0] = i
@@ -274,11 +276,16 @@ def train_env(
       training_metrics = jax.tree_util.tree_map(jp.mean, metrics)
       jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
 
-      print(f"data {main_slice[0]}:{main_slice[1]} network loss: {training_metrics[0]['total_loss']}, type loss: {training_metrics[1]['total_loss']}")
-      
+      av_network_loss += training_metrics[0]['total_loss']
+      av_type_loss += training_metrics[1]['total_loss']
+
       key_envs = jax.vmap(
           lambda x, s: jax.random.split(x[0], s),
           in_axes=(0, None))(key_envs, key_envs.shape[1])
+      
+    av_network_loss /= data_length
+    av_type_loss /= data_length
+    print(f'Average network loss: {av_network_loss}, Average type loss: {av_type_loss}')
 
   # If there was no mistakes the training_state should still be identical on all
   # devices.

@@ -58,7 +58,7 @@
     unroll_length: 10
     type_size: 4
     type_split_every: 10
-    data_loops: 5
+    data_loops: 1000
     num_minibatches: 1
     normalize_observations: True
   enviroment:
