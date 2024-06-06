@@ -201,8 +201,8 @@ def compute_env_loss(
     start_pipe = gen_pipeline(start_q, start_qd)
 
     def network_fn(state):
-      input = jp.concatenate(extract_q_dq([state.pipeline_state])[0],-1)
-      concat_input =  jp.concatenate((input, type_params),2)
+      input = extract_q_dq([state.pipeline_state])[0]
+      concat_input =  jp.concatenate((input[0], input[1], type_params),2)
       output, _ = net2.apply(net_params[1],concat_input,  None)
       new_pipe = gen_pipeline(output[:,:,:19],output[:,:,19:])
       state = state.replace(pipeline_state=new_pipe)
@@ -230,6 +230,7 @@ def compute_env_loss(
           metrics=reset_state.metrics
       )
     
+
     (final_state, rng), new_pipeline =  jax.lax.scan(step, (state, rng), (actions), length=actions.shape[0])
 
     new_states = extract_q_dq([new_pipeline])[0]

@@ -22,13 +22,13 @@
     in_params:
       hidden_layer_sizes:
         - 32
-      activation: 'relu'
-      activate_final: False
+      activation: 'tanh'
+      activate_final: True
     out_params:
       hidden_layer_sizes:
         - 32
-      activation: 'relu'
-      activate_final: False
+      activation: 'tanh'
+      activate_final: True
   agent_train:
     name: 'default'
     num_timesteps: 11000

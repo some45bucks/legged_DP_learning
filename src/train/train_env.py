@@ -182,7 +182,7 @@ def train_env(
 
     print("starting step compile...")
 
-    (_, out_data1), net_params, net_optimizer_state = net_gradient_update_fn(
+    (_, out_data1), net_params_out, net_optimizer_state = net_gradient_update_fn(
         net_params,
         type_params,
         data_chunk,
@@ -200,7 +200,7 @@ def train_env(
     
     metrics = (out_data1['loss_metrics'], out_data2['loss_metrics'])
 
-    return net_optimizer_state, type_optimizer_state, net_params, full_type_params, out_data2['normalizer_params'], metrics
+    return net_optimizer_state, type_optimizer_state, net_params_out, full_type_params, out_data2['normalizer_params'], metrics
 
   def training_epoch(training_state: TrainingState, data_chunk, key: PRNGKey) -> Tuple[TrainingState, Any]:
     
@@ -263,16 +263,14 @@ def train_env(
 
       epoch_key, local_key = jax.random.split(local_key)
       epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
-
+      
       training_state, data_chunk = _strip_weak_type((training_state, data_chunk))
-
       result = training_epoch(training_state, data_chunk ,epoch_keys)
 
       if main_slice[0] == 0 and it == 0:
         print("finished training epoch compile!")
 
       training_state, metrics = _strip_weak_type(result)
-
       training_metrics = jax.tree_util.tree_map(jp.mean, metrics)
       jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
 
