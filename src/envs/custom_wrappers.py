@@ -26,6 +26,21 @@ class HiddenStateWrapper(Wrapper):
         state.info['hidden_state'] = self.hidden_state
         return state
     
+class TypeWrapper(Wrapper):
+
+    def __init__(self, env: Env, dist_fn: Callable):
+        super().__init__(env)
+        self.dist_fn = dist_fn
+
+    def reset(self, rng: jax.Array) -> State:
+        rng1, rng2 = jax.random.split(rng)
+        state = self.env.reset(rng1)
+        state.info['env_type'] = self.dist_fn(rng2)
+        return state
+
+    def step(self, state: State, action: jax.Array) -> State:
+        return self.env.step(state, action)
+    
 class AutoNormWrapper(Wrapper):
 
     def __init__(self, env: Env, norm):

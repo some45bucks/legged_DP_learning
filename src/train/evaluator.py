@@ -13,8 +13,7 @@ from envs.custom_wrappers import AutoNormWrapper
 class evaluator:
   """Class to run evaluations."""
 
-  def __init__(self, eval_env: envs.Env,  ppo_network: ppo_network, norm, num_eval_envs: int,
-               episode_length: int, action_repeat: int, key: PRNGKey):
+  def __init__(self, eval_env: envs.Env,  ppo_network: ppo_network, norm, env_params, gen_func, net1, net2, num_eval_envs: int, episode_length: int, action_repeat: int, key: PRNGKey):
     self._key = key
     self._eval_walltime = 0
 
@@ -31,7 +30,11 @@ class evaluator:
         eval_first_state,
         key,
         eval_env,
-        unroll_length=episode_length // action_repeat)[0]
+        episode_length // action_repeat,
+        env_params,
+        gen_func,
+        net1,
+        net2)[0]
 
     self._generate_eval_unroll = jax.jit(generate_eval_unroll)
     self._steps_per_unroll = episode_length * num_eval_envs

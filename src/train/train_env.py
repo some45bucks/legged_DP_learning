@@ -181,7 +181,6 @@ def train_env(
     key, key_loss= jax.random.split(key)
 
     print("starting step compile...")
-
     (_, out_data1), net_params_out, net_optimizer_state = net_gradient_update_fn(
         net_params,
         type_params,
@@ -242,9 +241,7 @@ def train_env(
       params=net_params,
       full_type_params=type_params,
       normalizer_params=(running_statistics.init_state(
-          specs.Array(environment.action_size, jp.dtype('float32'))),
-          running_statistics.init_state(
-          specs.Array(environment.observation_size, jp.dtype('float32')))),
+          specs.Array(environment.vel_pos, jp.dtype('float32')))),
       env_steps=0)
   
   training_state = jax.device_put_replicated(

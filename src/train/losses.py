@@ -1,4 +1,4 @@
-from typing import Any, Tuple, List
+from typing import Any, Tuple, List, Optional
 from typing import Sequence, Callable
 from brax.training.types import Params, PRNGKey, NamedTuple
 import flax
@@ -87,11 +87,15 @@ def compute_ppo_loss(
     reward_scaling: float = 1.0,
     gae_lambda: float = 0.95,
     clipping_epsilon: float = 0.3,
-    normalize_advantage: bool = True) -> Tuple[jp.ndarray, Any]:
+    normalize_advantage: bool = True,
+    env_params: Optional[Tuple] = None,
+    gen_func: Optional[Callable] = None,
+    net1: Optional[Any] = None,
+    net2: Optional[Any] = None) -> Tuple[jp.ndarray, Any]:
 
     key1, key2 = jax.random.split(rng)
 
-    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
+    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length,env_params,gen_func,net1,net2)
 
     normalizer_params = running_statistics.update(
         normalizer_params,
@@ -200,10 +204,20 @@ def compute_env_loss(
 
     start_pipe = gen_pipeline(start_q, start_qd)
 
-    def network_fn(state):
+    def network_fn(state, normalizer_params):
       input = extract_q_dq([state.pipeline_state])[0]
-      concat_input =  jp.concatenate((input[0], input[1], type_params),2)
-      output, _ = net2.apply(net_params[1],concat_input,  None)
+      concat_input =  jp.concatenate((input[0], input[1]),2)
+
+      n_concat_input = running_statistics.normalize(concat_input, normalizer_params)
+
+      normalizer_params = running_statistics.update(
+        normalizer_params,
+        concat_input,
+        pmap_axis_name=_PMAP_AXIS_NAME)
+
+      n_concat_input =  jp.concatenate((n_concat_input, type_params),2)
+
+      output, _ = net2.apply(net_params[1],n_concat_input, None)
       new_pipe = gen_pipeline(output[:,:,:19],output[:,:,19:])
       state = state.replace(pipeline_state=new_pipe)
       return state
@@ -217,7 +231,7 @@ def compute_env_loss(
 
       new_state = step_fn(state,net_action)
 
-      new_state = network_fn(new_state)
+      new_state = network_fn(new_state, normalizer_params)
 
       return (new_state,rng), new_state.pipeline_state
 

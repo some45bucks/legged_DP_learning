@@ -55,10 +55,10 @@
     name: 'default'
     learning_rate: 0.0003
     seed: 0
-    unroll_length: 10
+    unroll_length: 20
     type_size: 4
     type_split_every: 10
-    data_loops: 1000
+    data_loops: 10
     num_minibatches: 1
     normalize_observations: True
   enviroment:

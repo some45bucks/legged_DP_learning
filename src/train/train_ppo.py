@@ -19,6 +19,7 @@ from brax.training.types import Params
 from brax.training.types import PRNGKey
 import flax
 import jax
+from jax import lax
 import numpy as np
 import optax
 
@@ -26,7 +27,7 @@ from networks.ppo import ppo_network, ppo_network_params, make_ppo_policy
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
 from train.losses import compute_ppo_loss
-from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper
+from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper, TypeWrapper
 from rendering.display import get_progress_fn
 from utils.save_load import save_params
 
@@ -55,8 +56,10 @@ def _strip_weak_type(tree):
     return leaf.astype(leaf.dtype)
   return jax.tree_util.tree_map(f, tree)
 
-def wrap(env, episode_length, action_repeat, randomization_fn=None, normalize=None):
+def wrap(env, episode_length, action_repeat, randomization_fn=None, normalize=None, type_dist_fn=None):
   env = HiddenStateWrapper(env)
+  if type_dist_fn != None:
+    env = TypeWrapper(env, type_dist_fn)
   env = envs.training.wrap(env, episode_length, action_repeat, randomization_fn)
   if normalize != None:
     env = AutoNormWrapper(env,normalize)
@@ -69,6 +72,8 @@ def save_ppo_params(steps ,params: Params,name, param_path):
 
 def train_ppo(
     make_ppo_network_partial: Callable[..., ppo_network],
+    make_in_part,
+    make_out_part,
     environment: envs.Env,
     num_timesteps: int,
     episode_length: int,
@@ -91,6 +96,7 @@ def train_ppo(
     reward_scaling: float = 1.0,
     clipping_epsilon: float = 0.3,
     gae_lambda: float = 0.95,
+    env_params: Optional[Union[Any, Any, Any]] = None,
     progress_fn: Callable[[int, Metrics], None] = get_progress_fn(),
     eval_env: Optional[envs.Env] = None,
     policy_params_fn: Callable[..., None] = save_ppo_params,
@@ -156,16 +162,44 @@ def train_ppo(
   ppo_net = make_ppo_network_partial(
       input = environment.observation_size,
       output = environment.action_size)
+  
+  if env_params is not None:
+    types = jp.stack(env_params[2]['params']['0'], axis=0)
+    type_mean = jp.mean(types, axis=0)
+    type_cov =  jp.cov(types.T)
 
-  env = wrap(environment, episode_length, action_repeat, randomization_fn, normalize)
+    type_dist_fn = functools.partial(jax.random.multivariate_normal, mean=type_mean, cov=type_cov)
+
+    test_type = type_dist_fn(jax.random.PRNGKey(0))
+
+    assert float('nan') != test_type[0], 'not enough data for a cov matrix'
+
+    in_net = make_in_part(
+        input_size = environment.action_size + types.size,
+        output_size = environment.action_size)
+    
+    out_net = make_out_part(
+        input_size = environment.vel_pos + types.size,
+        output_size = environment.vel_pos)
+  else:
+    type_dist_fn = None
+    in_net = None
+    
+    out_net = None
+
+  env = wrap(environment, episode_length, action_repeat, randomization_fn, normalize, type_dist_fn)
 
   reset_fn = jax.jit(jax.vmap(env.reset))
   key_envs = jax.random.split(key_env, num_envs // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
+  
+  if env_params is not None:
+    gen_func = jax.jit(jax.vmap(env.pipeline_init))
+  else:
+    gen_func = None
 
   env_state = reset_fn(key_envs,None)
-
   optimizer = optax.adam(learning_rate=learning_rate)
 
   loss_fn = functools.partial(
@@ -177,9 +211,15 @@ def train_ppo(
       reward_scaling=reward_scaling,
       gae_lambda=gae_lambda,
       clipping_epsilon=clipping_epsilon,
-      normalize_advantage=normalize_advantage)
+      normalize_advantage=normalize_advantage,
+      env_params=env_params,
+      gen_func = gen_func,
+      net1 = in_net,
+      net2 = out_net,)
 
   gradient_update_fn = gradient_update(loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
+
+  
   
   def minibatch_step(carry, xs):
     optimizer_state, params, normalizer_params, state, key = carry
@@ -211,7 +251,7 @@ def train_ppo(
     key_sgd, new_key = jax.random.split(key, 2)    
 
     (optimizer_state, params, norm_params, state, _), loss_metrics = jax.lax.scan(sgd_step,
-        (training_state.optimizer_state, training_state.params, training_state.normalizer_params ,state, key_sgd), (),
+        (training_state.optimizer_state, training_state.params, training_state.normalizer_params, state, key_sgd), (),
         length=num_updates_per_batch)
 
     new_training_state = TrainingState(
@@ -281,12 +321,16 @@ def train_ppo(
         randomization_fn, rng=jax.random.split(eval_key, num_eval_envs)
     )
 
-  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn, normalize=None)
+  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn, type_dist_fn=type_dist_fn)
 
   evaluator_fn = evaluator(
       eval_env,
       ppo_net,
       normalize,
+      env_params,
+      gen_func,
+      in_net,
+      out_net,
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
