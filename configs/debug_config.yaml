@@ -3,18 +3,19 @@
     name: 'default'
     head_params:
       hidden_layer_sizes:
-        - 32
+        - 256
+        - 256
       activation: 'relu'
       activate_final: False
     ppo_params:
       value_params:
         hidden_layer_sizes:
-          - 32
+          - 256
         activation: 'relu'
         activate_final: False
       policy_params:
         hidden_layer_sizes:
-          - 32
+          - 256
         activation: 'relu'
         activate_final: False
   env_network:
@@ -22,21 +23,25 @@
     in_params:
       hidden_layer_sizes:
         - 32
-      activation: 'tanh'
+        - 32
+        - 32
+      activation: 'relu'
       activate_final: True
     out_params:
       hidden_layer_sizes:
+        - 32
+        - 32
         - 32
       activation: 'tanh'
       activate_final: True
   agent_train:
     name: 'default'
-    num_timesteps: 11000
-    episode_length: 100
+    num_timesteps: 100000
+    episode_length: 500
     action_repeat: 1
-    num_envs: 4
+    num_envs: 64
     num_eval_envs: 10
-    num_evals: 3
+    num_evals: 10
     learning_rate: 0.0003
     entropy_cost: 0.0001
     discounting: 0.9
@@ -55,10 +60,10 @@
     name: 'default'
     learning_rate: 0.0003
     seed: 0
-    unroll_length: 20
+    unroll_length: 10
     type_size: 4
     type_split_every: 10
-    data_loops: 10
+    data_loops: 10000
     num_minibatches: 1
     normalize_observations: True
   enviroment:

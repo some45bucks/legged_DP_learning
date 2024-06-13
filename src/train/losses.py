@@ -87,15 +87,11 @@ def compute_ppo_loss(
     reward_scaling: float = 1.0,
     gae_lambda: float = 0.95,
     clipping_epsilon: float = 0.3,
-    normalize_advantage: bool = True,
-    env_params: Optional[Tuple] = None,
-    gen_func: Optional[Callable] = None,
-    net1: Optional[Any] = None,
-    net2: Optional[Any] = None) -> Tuple[jp.ndarray, Any]:
+    normalize_advantage: bool = True) -> Tuple[jp.ndarray, Any]:
 
     key1, key2 = jax.random.split(rng)
 
-    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length,env_params,gen_func,net1,net2)
+    final_state, data = unroll_policy(ppo_network,normalizer_params,params,start_state,key1,env,unroll_length)
 
     normalizer_params = running_statistics.update(
         normalizer_params,

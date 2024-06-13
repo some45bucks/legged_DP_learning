@@ -35,9 +35,14 @@ def record(reset, step, policy, rng, path='/', command=None):
     done = False
 
     hidden_state = state.info['hidden_state']
+    foundnan = False
     while not done:
         act_rng, key2 = jax.random.split(key2)
         ctrl, hidden_state = policy(state.obs, hidden_state, act_rng)
+        if jp.isnan(ctrl).any():
+            print("nan in action")
+            foundnan = True
+            break
         actions.append(ctrl)
         state = step(state, ctrl)
         rollout.append(state.pipeline_state)
@@ -46,8 +51,9 @@ def record(reset, step, policy, rng, path='/', command=None):
     actions.append(actions[-1])
 
     #save the rollout
-    with open(path+f"rollout_{rng}.pkl", 'wb') as file:
-        pkl.dump((rollout, actions), file)
+    if not foundnan:
+        with open(path+f"rollout_{rng}.pkl", 'wb') as file:
+            pkl.dump((rollout, actions), file)
 
     return rollout, actions
 

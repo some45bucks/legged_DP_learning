@@ -27,7 +27,7 @@ from networks.ppo import ppo_network, ppo_network_params, make_ppo_policy
 from train.evaluator import evaluator
 from train.gradients import gradient_update_fn as gradient_update
 from train.losses import compute_ppo_loss
-from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper, TypeWrapper
+from envs.custom_wrappers import HiddenStateWrapper, AutoNormWrapper, NetWrapper
 from rendering.display import get_progress_fn
 from utils.save_load import save_params
 
@@ -56,10 +56,10 @@ def _strip_weak_type(tree):
     return leaf.astype(leaf.dtype)
   return jax.tree_util.tree_map(f, tree)
 
-def wrap(env, episode_length, action_repeat, randomization_fn=None, normalize=None, type_dist_fn=None):
+def wrap(env, episode_length, action_repeat, randomization_fn=None, normalize=None, netWrapData=None):
   env = HiddenStateWrapper(env)
-  if type_dist_fn != None:
-    env = TypeWrapper(env, type_dist_fn)
+  if netWrapData != None:
+    env = NetWrapper(env, *netWrapData)
   env = envs.training.wrap(env, episode_length, action_repeat, randomization_fn)
   if normalize != None:
     env = AutoNormWrapper(env,normalize)
@@ -181,24 +181,19 @@ def train_ppo(
     out_net = make_out_part(
         input_size = environment.vel_pos + types.size,
         output_size = environment.vel_pos)
-  else:
-    type_dist_fn = None
-    in_net = None
     
-    out_net = None
+    gen_func = jax.jit(environment.pipeline_init)
+    
+    netWrapData = (in_net, out_net, env_params[1][0], env_params[1][1], env_params[0], type_dist_fn, gen_func)
+  else:
+    netWrapData = None
 
-  env = wrap(environment, episode_length, action_repeat, randomization_fn, normalize, type_dist_fn)
+  env = wrap(environment, episode_length, action_repeat, randomization_fn, normalize, netWrapData)
 
   reset_fn = jax.jit(jax.vmap(env.reset))
   key_envs = jax.random.split(key_env, num_envs // process_count)
   key_envs = jp.reshape(key_envs,
                          (local_devices_to_use, -1) + key_envs.shape[1:])
-  
-  if env_params is not None:
-    gen_func = jax.jit(jax.vmap(env.pipeline_init))
-  else:
-    gen_func = None
-
   env_state = reset_fn(key_envs,None)
   optimizer = optax.adam(learning_rate=learning_rate)
 
@@ -211,11 +206,7 @@ def train_ppo(
       reward_scaling=reward_scaling,
       gae_lambda=gae_lambda,
       clipping_epsilon=clipping_epsilon,
-      normalize_advantage=normalize_advantage,
-      env_params=env_params,
-      gen_func = gen_func,
-      net1 = in_net,
-      net2 = out_net,)
+      normalize_advantage=normalize_advantage)
 
   gradient_update_fn = gradient_update(loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True)
 
@@ -321,16 +312,12 @@ def train_ppo(
         randomization_fn, rng=jax.random.split(eval_key, num_eval_envs)
     )
 
-  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn, type_dist_fn=type_dist_fn)
+  eval_env = wrap(eval_env, episode_length=episode_length, action_repeat=action_repeat, randomization_fn=v_randomization_fn, netWrapData=netWrapData)
 
   evaluator_fn = evaluator(
       eval_env,
       ppo_net,
       normalize,
-      env_params,
-      gen_func,
-      in_net,
-      out_net,
       num_eval_envs=num_eval_envs,
       episode_length=episode_length,
       action_repeat=action_repeat,
@@ -383,4 +370,4 @@ def train_ppo(
   logging.info('total steps: %s', total_steps)
   pmap.synchronize_hosts()
   policy = make_ppo_policy(ppo_network=ppo_net, ppo_params=_unpmap(training_state.params))
-  return policy, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), metrics
+  return policy, _unpmap(training_state.normalizer_params), _unpmap(training_state.params), netWrapData ,metrics

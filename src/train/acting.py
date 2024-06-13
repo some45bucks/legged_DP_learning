@@ -5,10 +5,8 @@ from brax import envs
 from brax.training.types import PRNGKey
 import jax
 from jax import numpy as jp
-from brax.training.acme import running_statistics
 
 from networks.ppo import ppo_network, ppo_network_params
-from utils.data_funcs import extract_q_dq
 
 class Transition(NamedTuple):
   hidden_state: jp.ndarray
@@ -30,14 +28,8 @@ def unroll_policy(ppo_network: ppo_network,
           start_state: envs.State,
           rng: jp.ndarray,
           env: envs.Env,
-          unroll_length: int,
-          env_params: Optional[Tuple] = None,
-          gen_func: Optional[Callable] = None,
-          net1: Optional[Callable] = None,
-          net2: Optional[Callable] = None
+          unroll_length: int
           ) -> Tuple[Any,Transition]:
-      
-      assert gen_func is None and net1 is None and net2 is None if env_params is None else gen_func is not None and net1 is not None and net2 is not None, f"Must all be the same. env_params: {env_params}, gen_func: {gen_func}, net1: {net1}, net2: {net2}"
 
       @jax.jit
       def step(carry: Tuple[envs.State, jp.ndarray], unused_t) -> Tuple[Any,Transition]:
@@ -61,29 +53,7 @@ def unroll_policy(ppo_network: ppo_network,
 
           baseline = jp.squeeze(baseline, axis=-1)
 
-          def network_fn(state):
-                input = extract_q_dq([state.pipeline_state])[0]
-                concat_input =  jp.concatenate((input[0], input[1]),1)
-
-                n_concat_input = running_statistics.normalize(concat_input, env_params[0])
-
-                n_concat_input =  jp.concatenate((n_concat_input, state.info['env_type']),1)
-
-                output, _ = net2.apply(env_params[1][1],n_concat_input, None)
-                new_pipe = gen_func(output[:,:19],output[:,19:])
-                state = state.replace(pipeline_state=new_pipe)
-                return state
-
-          if env_params is None:
-            next_state = env.step(state, actions, normalizer_params)
-          else:
-            concat_actions =  jp.concatenate((actions, state.info['env_type']),1)
-
-            net_action, _ = net1.apply(env_params[1][0],concat_actions,  None)
-
-            new_state = env.step(state,net_action,normalizer_params)
-
-            next_state = network_fn(new_state)               
+          next_state = env.step(state, actions, normalizer_params)
 
           return (next_state, next_key), Transition( 
             observation=state.obs,
