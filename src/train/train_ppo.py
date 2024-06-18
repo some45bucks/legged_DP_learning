@@ -233,6 +233,7 @@ def train_ppo(
         minibatch_step,
         (optimizer_state, params, normalizer_params, state, key_grad), (),
         length=num_minibatches)
+
     return (optimizer_state, params, normalizer_params, state, key), loss_metrics
 
   def training_step(

@@ -54,7 +54,6 @@ def unroll_policy(ppo_network: ppo_network,
           baseline = jp.squeeze(baseline, axis=-1)
 
           next_state = env.step(state, actions, normalizer_params)
-
           return (next_state, next_key), Transition( 
             observation=state.obs,
             raw_actions=raw_actions,

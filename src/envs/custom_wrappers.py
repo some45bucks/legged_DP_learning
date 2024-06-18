@@ -36,15 +36,15 @@ class AutoNormWrapper(Wrapper):
 
     def reset(self, rng: jax.Array, params) -> State:
         state = self.env.reset(rng)
-        if params is not None:
-            obs = self.norm(state.obs, params)
-            state = state.replace(obs=obs)
+        # if params is not None:
+        #     obs = self.norm(state.obs, params)
+        #     state = state.replace(obs=obs)
         return state
 
     def step(self, state: State, action: jax.Array, params) -> State:
         state = self.env.step(state, action)
-        obs = self.norm(state.obs, params)
-        state = state.replace(obs=obs)
+        # obs = self.norm(state.obs, params)
+        # state = state.replace(obs=obs)
         return state
     
 class CompleteAutoNormWrapper(Wrapper):
@@ -56,14 +56,14 @@ class CompleteAutoNormWrapper(Wrapper):
 
     def reset(self, rng: jax.Array) -> State:
         state = self.env.reset(rng)
-        obs = self.norm(state.obs, self.params)
-        state = state.replace(obs=obs)
+        # obs = self.norm(state.obs, self.params)
+        # state = state.replace(obs=obs)
         return state
 
     def step(self, state: State, action: jax.Array) -> State:
         state = self.env.step(state, action)
-        obs = self.norm(state.obs, self.params)
-        state = state.replace(obs=obs)
+        # obs = self.norm(state.obs, self.params)
+        # state = state.replace(obs=obs)
         return state
     
 class NetWrapper(Wrapper):

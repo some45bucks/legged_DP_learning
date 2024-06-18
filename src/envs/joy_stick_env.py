@@ -187,7 +187,8 @@ class JoyStickEnv(PipelineEnv):
 
     # physics step
     motor_targets = self._default_pose + action * self._action_scale
-    # motor_targets = jp.clip(motor_targets, self.lowers, self.uppers)
+    
+    motor_targets = jp.clip(motor_targets, self.lowers, self.uppers)
     pipeline_state = self.pipeline_step(state.pipeline_state, motor_targets)
     x, xd = pipeline_state.x, pipeline_state.xd
 
@@ -208,8 +209,8 @@ class JoyStickEnv(PipelineEnv):
     # done if joint limits are reached or robot is falling
     up = jp.array([0.0, 0.0, 1.0])
     done = jp.dot(math.rotate(up, x.rot[self._torso_idx - 1]), up) < 0
-    # done |= jp.any(joint_angles < self.lowers)
-    # done |= jp.any(joint_angles > self.uppers)
+    done |= jp.any(joint_angles < self.lowers)
+    done |= jp.any(joint_angles > self.uppers)
     done |= pipeline_state.x.pos[self._torso_idx - 1, 2] < 0.18
 
     # reward
@@ -292,10 +293,11 @@ class JoyStickEnv(PipelineEnv):
         state_info['last_act'],                              # last action
     ])
 
+    
+
     obs = jp.clip(obs, -100.0, 100.0)
 
     obs = jp.roll(obs_history, obs.size).at[:obs.size].set(obs)
-
     return obs
 
   # ------------ reward functions----------------

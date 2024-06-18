@@ -39,6 +39,7 @@ def record(reset, step, policy, rng, path='/', command=None):
     while not done:
         act_rng, key2 = jax.random.split(key2)
         ctrl, hidden_state = policy(state.obs, hidden_state, act_rng)
+        print(ctrl)
         if jp.isnan(ctrl).any():
             print("nan in action")
             foundnan = True
